@@ -1,6 +1,7 @@
 const api = window.honeycomb;
 const get = (id) => document.getElementById(id);
 const viewButtons = document.querySelectorAll("[data-view]");
+const connectorButtons = document.querySelectorAll("[data-connector]");
 const promptField = get("prompt");
 const providerField = get("provider");
 const runButton = get("run-task");
@@ -30,6 +31,7 @@ const usd = new Intl.NumberFormat("en-US", {
 
 let folder;
 let selectedRunId;
+let selectedConnectorId = "codex";
 let choosing = false;
 let checking = false;
 let starting = false;
@@ -50,8 +52,10 @@ function element(tag, className, text) {
 
 function showView(name) {
   for (const button of viewButtons) {
-    const selected = button.dataset.view === name;
-    get(button.dataset.view).hidden = !selected;
+    const view = button.dataset.view;
+    const selected = view === name;
+    get(view).hidden = !selected;
+    get(`${view}-sidebar`).hidden = !selected;
     if (selected) button.setAttribute("aria-current", "page");
     else button.removeAttribute("aria-current");
   }
@@ -93,7 +97,7 @@ function renderControls() {
   const stop = get("stop-run");
   const provider = connectors.find((connector) => connector.id === providerField.value);
   get("choose-folder").disabled = choosing || busy;
-  get("new-task").hidden = !selectedRunId || busy;
+  get("new-task").disabled = choosing || busy;
   stop.hidden = !active;
   stop.disabled = active?.status === "stopping";
   stop.textContent = stop.disabled ? "Stopping…" : "Stop run";
@@ -205,6 +209,9 @@ function renderDetails(run) {
 
 function renderChats() {
   const run = runs.get(selectedRunId);
+  const title = get("chat-title");
+  title.textContent = run?.prompt.replace(/\s+/g, " ") ?? "New task";
+  title.title = run ? title.textContent : "";
   renderSidebar();
   renderThread(run);
   renderDetails(run);
@@ -220,42 +227,33 @@ function renderConnectors() {
   const refresh = get("refresh-connectors");
   refresh.disabled = checking;
   refresh.textContent = checking ? "Checking…" : "Refresh";
-  const detected = connectors.filter((connector) => connector.status === "detected").length;
-  const summary = checking ? "Checking connectors…" : `${detected} of ${connectors.length} connectors detected`;
-  const summaryStatus = checking ? "checking" : (detected ? "detected" : "missing");
-  get("connector-summary").replaceChildren(statusDot(summaryStatus), summary);
-  const cards = connectors.map((connector) => {
-    const card = element("section", "connector-card");
-    const header = element("header");
-    const name = element("div", "connector-name");
-    const mark = element("span", `connector-monogram ${connector.id}`, connector.name[0]);
-    mark.setAttribute("aria-hidden", "true");
-    name.append(mark, element("h2", "", connector.name));
 
-    const state = element("span", "run-state connector-status");
-    state.dataset.status = connector.status;
-    state.append(statusDot(connector.status), connectorLabels[connector.status]);
-    header.append(name, state);
-    card.append(header, element("p", "", connectorDescriptions[connector.id]));
+  for (const button of connectorButtons) {
+    const connector = connectors.find((entry) => entry.id === button.dataset.connector);
+    const state = button.querySelector(".connector-row-status");
+    state.replaceChildren(statusDot(connector.status), connectorLabels[connector.status]);
+    if (connector.id === selectedConnectorId) button.setAttribute("aria-current", "true");
+    else button.removeAttribute("aria-current");
+  }
 
-    if (connector.version) card.append(element("p", "connector-version", `CLI version ${connector.version}`));
-    if (connector.status === "missing") card.append(element("p", "", "Install the CLI and make it available on PATH."));
-    if (connector.detail) card.append(element("p", "", connector.detail));
+  const connector = connectors.find((entry) => entry.id === selectedConnectorId);
+  const mark = get("connector-mark");
+  mark.textContent = connector.name[0];
+  mark.classList.toggle("opencode", connector.id === "opencode");
+  get("connector-title").textContent = connector.name;
+  get("connector-description").textContent = connectorDescriptions[connector.id];
+  get("connector-status").replaceChildren(statusDot(connector.status), connectorLabels[connector.status]);
+  get("connector-version").textContent = connector.version ?? "";
+  get("connector-version-row").hidden = !connector.version;
 
-    const use = element("button", "button button-small", `Use ${connector.name}`);
-    use.type = "button";
-    use.disabled = connector.status !== "detected";
-    use.addEventListener("click", () => {
-      providerField.value = connector.id;
-      actionError = "";
-      showView("chats");
-      renderControls();
-      promptField.focus();
-    });
-    card.append(use);
-    return card;
-  });
-  get("connector-list").replaceChildren(...cards);
+  const note = get("connector-detail-note");
+  const installHint = connector.status === "missing" ? "Install the CLI and make it available on PATH." : "";
+  note.textContent = connector.detail || installHint;
+  note.hidden = !note.textContent;
+
+  const use = get("use-connector");
+  use.textContent = `Use ${connector.name}`;
+  use.disabled = connector.status !== "detected";
 }
 
 async function refreshConnectors() {
@@ -278,11 +276,25 @@ async function refreshConnectors() {
 for (const button of viewButtons) {
   button.addEventListener("click", () => showView(button.dataset.view));
 }
+for (const button of connectorButtons) {
+  button.addEventListener("click", () => {
+    selectedConnectorId = button.dataset.connector;
+    renderConnectors();
+  });
+}
+get("select-solo").addEventListener("click", () => get("solo-title").focus());
 get("use-solo").addEventListener("click", () => {
   showView("chats");
   promptField.focus();
 });
 get("refresh-connectors").addEventListener("click", refreshConnectors);
+get("use-connector").addEventListener("click", () => {
+  providerField.value = selectedConnectorId;
+  actionError = "";
+  showView("chats");
+  renderControls();
+  promptField.focus();
+});
 get("stop-run").addEventListener("click", async () => {
   const run = activeRun();
   if (!run) return;

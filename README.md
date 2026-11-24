@@ -19,6 +19,8 @@ On Windows, `npm.cmd ci` and `npm.cmd start` also work from PowerShell.
 
 Review mode is for trusted local folders. Codex uses its read-only sandbox. OpenCode uses agent permissions for project reads and searches. Your selected CLI can send the prompt and relevant code to its configured model. Each run has a five-minute limit, and Honeycomb keeps the most recent 20 runs for the current app session.
 
+Honeycomb gives each OpenCode review a temporary in-memory database. OpenCode loads its global model settings and saved provider credentials for the run. [OpenCode database setting](https://github.com/anomalyco/opencode/blob/v1.14.20/packages/opencode/src/storage/db.ts#L33-L38)
+
 ## Project layout
 
 | Path | Responsibility |

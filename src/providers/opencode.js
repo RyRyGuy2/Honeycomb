@@ -32,6 +32,8 @@ export const opencode = {
       args: ["run", "--format", "json", "--pure", "--agent", AGENT],
       input: prompt,
       env: {
+        // Each Honeycomb review starts a new session with its own schema.
+        OPENCODE_DB: ":memory:",
         OPENCODE_DISABLE_AUTOUPDATE: "true",
         OPENCODE_DISABLE_PROJECT_CONFIG: "true",
         OPENCODE_DISABLE_CLAUDE_CODE: "true",

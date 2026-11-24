@@ -8,23 +8,41 @@
     <script defer src="./app.js"></script>
   </head>
   <body>
-    <header class="app-header">
+    <div class="app-rail">
       <div class="brand">
-        <span class="brand-mark" aria-hidden="true"><span></span></span>
-        <span>Honeycomb</span>
+        <span class="brand-mark" role="img" aria-label="Honeycomb"><span aria-hidden="true"></span></span>
       </div>
       <nav class="navigation" aria-label="Main navigation">
-        <button type="button" data-view="chats" aria-current="page">Chats</button>
-        <button type="button" data-view="workflows">Workflows</button>
-        <button type="button" data-view="connectors">Connectors</button>
+        <button type="button" data-view="chats" aria-label="Chats" aria-controls="chats-sidebar chats" aria-current="page">
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M6 4.5h12A2.5 2.5 0 0 1 20.5 7v8a2.5 2.5 0 0 1-2.5 2.5h-7l-5 3v-3A2.5 2.5 0 0 1 3.5 15V7A2.5 2.5 0 0 1 6 4.5Z"/>
+            <path d="M8 9h8m-8 4h5"/>
+          </svg>
+        </button>
+        <button type="button" data-view="workflows" aria-label="Workflows" aria-controls="workflows-sidebar workflows">
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <rect x="9" y="3.5" width="6" height="5" rx="1.2"/>
+            <path d="M12 8.5v3m-6 3v-3h12v3"/>
+            <rect x="3" y="14.5" width="6" height="5" rx="1.2"/>
+            <rect x="15" y="14.5" width="6" height="5" rx="1.2"/>
+          </svg>
+        </button>
+        <button type="button" data-view="connectors" aria-label="Connectors" aria-controls="connectors-sidebar connectors">
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M9 3.5v5m6-5v5m-9 0h12m-11 0v3a5 5 0 0 0 10 0v-3m-5 8v4"/>
+          </svg>
+        </button>
       </nav>
-      <div id="connector-summary" class="connector-summary" aria-live="polite"></div>
-    </header>
+    </div>
 
-    <main id="chats" class="workspace">
-      <aside class="sidebar" aria-label="Project and run history">
+    <div class="sidebar">
+      <aside id="chats-sidebar" class="sidebar-panel" aria-labelledby="chats-sidebar-title">
+        <h2 id="chats-sidebar-title" class="sidebar-title">Chats</h2>
+        <button type="button" id="new-task" class="button sidebar-action">
+          <span aria-hidden="true">+</span> New task
+        </button>
         <div class="sidebar-section">
-          <h2>Project</h2>
+          <h3>Project</h3>
           <button type="button" id="choose-folder" class="folder-picker">
             <span class="folder-icon" aria-hidden="true"></span>
             <span id="folder-name">Choose a folder</span>
@@ -33,15 +51,47 @@
           <p id="folder-path" class="folder-path" hidden></p>
         </div>
         <div class="sidebar-section run-history">
-          <h2>Recent runs</h2>
+          <h3>Recent runs</h3>
           <div id="run-list" class="run-list"></div>
         </div>
       </aside>
 
-      <section class="chat-pane" aria-label="Chat workspace">
+      <aside id="workflows-sidebar" class="sidebar-panel" aria-labelledby="workflows-sidebar-title" hidden>
+        <h2 id="workflows-sidebar-title" class="sidebar-title">Workflows</h2>
+        <div class="sidebar-list">
+          <button type="button" id="select-solo" class="sidebar-item" aria-current="true" aria-controls="workflows">
+            <span class="workflow-marker" aria-hidden="true"></span>
+            Solo
+          </button>
+        </div>
+      </aside>
+
+      <aside id="connectors-sidebar" class="sidebar-panel" aria-labelledby="connectors-sidebar-title" hidden>
+        <h2 id="connectors-sidebar-title" class="sidebar-title">Connectors</h2>
+        <div class="sidebar-list">
+          <button type="button" class="sidebar-item" data-connector="codex" aria-current="true" aria-controls="connector-detail">
+            <span class="connector-monogram" aria-hidden="true">C</span>
+            <span class="connector-row">
+              <span>Codex</span>
+              <span class="connector-row-status">Checking</span>
+            </span>
+          </button>
+          <button type="button" class="sidebar-item" data-connector="opencode" aria-controls="connector-detail">
+            <span class="connector-monogram opencode" aria-hidden="true">O</span>
+            <span class="connector-row">
+              <span>OpenCode</span>
+              <span class="connector-row-status">Checking</span>
+            </span>
+          </button>
+        </div>
+        <button type="button" id="refresh-connectors" class="button sidebar-action">Refresh</button>
+      </aside>
+    </div>
+
+    <main id="chats" class="workspace">
+      <section class="chat-pane" aria-labelledby="chat-title">
         <div class="chat-header">
-          <h1>Chats</h1>
-          <button type="button" id="new-task" class="button button-small" hidden>New task</button>
+          <h1 id="chat-title">New task</h1>
           <button type="button" id="stop-run" class="button button-small" hidden>Stop run</button>
         </div>
         <div id="thread" class="thread">
@@ -93,14 +143,10 @@
 
     <main id="workflows" class="library" hidden>
       <div class="library-header">
-        <h1>Workflows</h1>
-        <p>Choose how your task runs.</p>
+        <h1 id="solo-title" tabindex="-1">Solo</h1>
+        <p>One agent reviews the selected project and reports in Chats.</p>
       </div>
       <section class="workflow-card" aria-labelledby="solo-title">
-        <div class="workflow-description">
-          <h2 id="solo-title">Solo</h2>
-          <p>One agent reviews the selected project and reports in Chats.</p>
-        </div>
         <div class="workflow-flow" aria-label="Your task, then one agent, then a run report">
           <div class="workflow-step">Your task</div>
           <div class="workflow-link" aria-hidden="true">→</div>
@@ -115,15 +161,28 @@
     </main>
 
     <main id="connectors" class="library" hidden>
-      <div class="library-header with-action">
+      <div class="library-header connector-heading">
+        <span id="connector-mark" class="connector-monogram" aria-hidden="true">C</span>
         <div>
-          <h1>Connectors</h1>
-          <p>Use the coding agents installed on this computer.</p>
+          <h1 id="connector-title">Codex</h1>
+          <p id="connector-description"></p>
         </div>
-        <button type="button" id="refresh-connectors" class="button">Refresh</button>
       </div>
-      <div id="connector-list" class="connector-list"></div>
-      <p class="connector-note">Sign in or set a default model in each CLI. Refresh checks installation and version.</p>
+      <section id="connector-detail" class="connector-card" aria-labelledby="connector-title">
+        <dl class="connector-facts">
+          <div>
+            <dt>Installation</dt>
+            <dd id="connector-status" class="run-state" role="status">Checking</dd>
+          </div>
+          <div id="connector-version-row" hidden>
+            <dt>CLI version</dt>
+            <dd id="connector-version"></dd>
+          </div>
+        </dl>
+        <p id="connector-detail-note" class="connector-note" hidden></p>
+        <button type="button" id="use-connector" class="button button-primary" disabled>Use Codex</button>
+      </section>
+      <p class="connector-note">Sign in or set a default model in the CLI before running a task.</p>
     </main>
   </body>
 </html>
