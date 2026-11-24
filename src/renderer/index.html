@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Honeycomb</title>
+    <link rel="stylesheet" href="./styles.css">
+    <script defer src="./app.js"></script>
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"><span></span></span>
+        <span>Honeycomb</span>
+      </div>
+      <nav class="navigation" aria-label="Main navigation">
+        <button type="button" data-view="chats" aria-current="page">Chats</button>
+        <button type="button" data-view="workflows">Workflows</button>
+        <button type="button" data-view="connectors">Connectors</button>
+      </nav>
+      <div id="connector-summary" class="connector-summary" aria-live="polite"></div>
+    </header>
+
+    <main id="chats" class="workspace">
+      <aside class="sidebar" aria-label="Project and run history">
+        <div class="sidebar-section">
+          <h2>Project</h2>
+          <button type="button" id="choose-folder" class="folder-picker">
+            <span class="folder-icon" aria-hidden="true"></span>
+            <span id="folder-name">Choose a folder</span>
+            <span class="picker-arrow" aria-hidden="true">↗</span>
+          </button>
+          <p id="folder-path" class="folder-path" hidden></p>
+        </div>
+        <div class="sidebar-section run-history">
+          <h2>Recent runs</h2>
+          <div id="run-list" class="run-list"></div>
+        </div>
+      </aside>
+
+      <section class="chat-pane" aria-label="Chat workspace">
+        <div class="chat-header">
+          <h1>Chats</h1>
+          <button type="button" id="new-task" class="button button-small" hidden>New task</button>
+          <button type="button" id="stop-run" class="button button-small" hidden>Stop run</button>
+        </div>
+        <div id="thread" class="thread">
+          <div id="welcome" class="welcome">
+            <div class="welcome-mark" aria-hidden="true">
+              <span></span><span></span><span></span>
+            </div>
+            <h2>Start a review run</h2>
+            <p>Choose a project and ask Codex or OpenCode to investigate.</p>
+            <div class="prompt-ideas" aria-label="Example tasks">
+              <button type="button" data-prompt="Summarize the repository layout and point me to the main entry points.">
+                Map the repository <span aria-hidden="true">↗</span>
+              </button>
+              <button type="button" data-prompt="Find the test entry points and explain how to run them.">
+                Find the tests <span aria-hidden="true">↗</span>
+              </button>
+            </div>
+          </div>
+          <div id="feed" class="feed" hidden></div>
+        </div>
+
+        <div class="composer-area">
+          <form id="composer" class="composer">
+            <label class="visually-hidden" for="prompt">Task for the agent</label>
+            <textarea id="prompt" rows="3" maxlength="8000" placeholder="Ask about your project…"></textarea>
+            <div class="composer-actions">
+              <div class="composer-options">
+                <label class="visually-hidden" for="provider">Connector</label>
+                <select id="provider">
+                  <option value="codex">Codex</option>
+                  <option value="opencode">OpenCode</option>
+                </select>
+                <span class="review-mode">Review mode</span>
+              </div>
+              <button type="submit" id="run-task" class="button button-primary" disabled>
+                Run task <span aria-hidden="true">→</span>
+              </button>
+            </div>
+          </form>
+          <p id="chat-status" class="chat-status" role="status" aria-live="polite"></p>
+        </div>
+      </section>
+
+      <aside class="details" aria-labelledby="details-title">
+        <h2 id="details-title">Run details</h2>
+        <div id="run-details"></div>
+      </aside>
+    </main>
+
+    <main id="workflows" class="library" hidden>
+      <div class="library-header">
+        <h1>Workflows</h1>
+        <p>Choose how your task runs.</p>
+      </div>
+      <section class="workflow-card" aria-labelledby="solo-title">
+        <div class="workflow-description">
+          <h2 id="solo-title">Solo</h2>
+          <p>One agent reviews the selected project and reports in Chats.</p>
+        </div>
+        <div class="workflow-flow" aria-label="Your task, then one agent, then a run report">
+          <div class="workflow-step">Your task</div>
+          <div class="workflow-link" aria-hidden="true">→</div>
+          <div class="workflow-step workflow-agent">Codex or OpenCode</div>
+          <div class="workflow-link" aria-hidden="true">→</div>
+          <div class="workflow-step">Run report</div>
+        </div>
+        <div class="workflow-footer">
+          <button type="button" id="use-solo" class="button button-primary">Use Solo <span aria-hidden="true">→</span></button>
+        </div>
+      </section>
+    </main>
+
+    <main id="connectors" class="library" hidden>
+      <div class="library-header with-action">
+        <div>
+          <h1>Connectors</h1>
+          <p>Use the coding agents installed on this computer.</p>
+        </div>
+        <button type="button" id="refresh-connectors" class="button">Refresh</button>
+      </div>
+      <div id="connector-list" class="connector-list"></div>
+      <p class="connector-note">Sign in or set a default model in each CLI. Refresh checks installation and version.</p>
+    </main>
+  </body>
+</html>
