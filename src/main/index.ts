@@ -12,7 +12,9 @@ import { opencode, parseOpenCodeModel } from "../providers/opencode.js";
 import { runProcess } from "../service/process.js";
 import { createRunService } from "../service/runs.js";
 import { createWorkspaceStore } from "../service/workspace.js";
+import { createWorktreeManager } from "../service/worktree.js";
 import type { IpcCalls, ProjectFolder, ProviderId, WorkspaceMode } from "../shared/contracts.js";
+import { supportsWorktreeEditing } from "../shared/editing.js";
 import { asRecord } from "../shared/records.js";
 
 const APP_URL = "honeycomb://app/";
@@ -22,6 +24,7 @@ const RENDERER_ASSETS = new Map<string, readonly [filename: string, contentType:
   ["/styles.css", ["styles.css", "text/css"]],
   ["/app.js", ["app.js", "text/javascript"]],
   ["/shared/conversations.js", ["../shared/conversations.js", "text/javascript"]],
+  ["/shared/editing.js", ["../shared/editing.js", "text/javascript"]],
   ["/markdown-it.js", ["markdown-it.js", "text/javascript"]],
   ["/honeycomb-logo.svg", ["honeycomb-logo.svg", "image/svg+xml"]],
 ]);
@@ -49,16 +52,20 @@ const connectorJobs = new Set<Promise<unknown>>();
 const getOpenCodePath = () => managedOpenCodePath(app.getPath("userData"));
 const modelFile = (providerId: ProviderId) => join(app.getPath("userData"), `${providerId}-model`);
 const workspace = createWorkspaceStore(() => join(app.getPath("userData"), "workspace.json"));
+const worktrees = createWorktreeManager(
+  () => join(app.getPath("userData"), "worktrees"),
+  () => { void workspace.save(workspaceState()); },
+);
 const runs = createRunService((run) => {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("honeycomb:run-changed", run);
   if (run.revision === 1 || run.finishedAt) void workspace.save(workspaceState());
 }, (providerId) => ({
   executable: providerId === "opencode" ? getOpenCodePath() : undefined,
   model: selectedModels[providerId],
-}));
+}), worktrees);
 
 function workspaceState() {
-  return { folder, projects, runs: runs.history(), mode };
+  return { folder, projects, runs: runs.history(), mode, worktrees: worktrees.records() };
 }
 
 async function removeProject(path: string) {
@@ -216,7 +223,16 @@ function registerHandlers() {
     await workspace.save(workspaceState());
     return project;
   });
-  handle("start-run", (request) => runs.start(mode === "code" ? folder : undefined, { ...asRecord(request), mode }));
+  handle("start-run", async (request) => {
+    const payload = asRecord(request) ?? {};
+    const workspaceMode = mode;
+    const project = workspaceMode === "code" ? folder : undefined;
+    if (payload.edit === true && supportsWorktreeEditing(payload.providerId) && project) {
+      await worktrees.inspect(project.path);
+      if (mode !== workspaceMode || folder?.path !== project.path) throw new Error("The selected project changed. Try again.");
+    }
+    return runs.start(project, { ...payload, mode: workspaceMode });
+  });
   handle("open-reply-link", (value) => {
     if (typeof value !== "string") throw new Error("Invalid link.");
     const url = new URL(value);
@@ -226,6 +242,36 @@ function registerHandlers() {
   handle("stop-run", (runId) => {
     if (typeof runId !== "string") throw new Error("Invalid run.");
     runs.stop(runId);
+  });
+  handle("keep-worktree", async (worktreeId) => {
+    if (typeof worktreeId !== "string") throw new Error("Invalid worktree.");
+    if (!worktrees.keep(worktreeId)) return false;
+    runs.setWorktreeState(worktreeId, "kept");
+    await workspace.save(workspaceState());
+    return true;
+  });
+  handle("discard-worktree", async (worktreeId, window) => {
+    if (typeof worktreeId !== "string") throw new Error("Invalid worktree.");
+    const record = worktrees.find(worktreeId);
+    if (!record) throw new Error("This worktree is no longer recorded.");
+    if (runs.history().some((run) => run.worktree?.id === worktreeId &&
+        (run.status === "running" || run.status === "stopping"))) {
+      throw new Error("Stop the run before discarding its worktree.");
+    }
+    const { response } = await dialog.showMessageBox(window, {
+      type: "warning",
+      title: "Discard worktree",
+      message: `Discard ${record.branch}?`,
+      detail: `Honeycomb deletes the worktree folder and the branch it created:\n${record.path}\n\nThe original project and its Git history stay unchanged.`,
+      buttons: ["Cancel", "Discard worktree"],
+      defaultId: 0,
+      cancelId: 0,
+    });
+    if (response !== 1 || window.isDestroyed()) return false;
+    await worktrees.discard(worktreeId);
+    runs.setWorktreeState(worktreeId, "discarded");
+    await workspace.save(workspaceState());
+    return true;
   });
   handle("sidebar-menu", async (request, window) => {
     const { target, id, x, y } = asRecord(request) ?? {};
@@ -302,7 +348,13 @@ app.whenReady().then(async () => {
   if (saved) {
     projects = saved.projects;
     folder = projects.find((project) => project.path === saved.folder?.path);
+    worktrees.restore(saved.worktrees ?? []);
     runs.restore(saved.runs);
+    for (const run of runs.history()) {
+      const worktree = run.worktree;
+      const record = worktree && worktrees.find(worktree.id);
+      if (worktree && record) run.worktree = { ...worktree, state: record.state };
+    }
     if (saved.mode === "chat") mode = "chat";
   }
   await Promise.all(PROVIDER_IDS.map(async (providerId) => {

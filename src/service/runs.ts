@@ -5,12 +5,16 @@ import { join } from "node:path";
 import { streamClaude } from "../providers/claude.js";
 import { parseCodexModel } from "../providers/codex.js";
 import { checkProvider, providerEnvironment, providers } from "../providers/index.js";
-import { parseEffort, streamCodexChat, streamOpenCodeChat, streamProvider } from "../providers/stream.js";
+import { parseEffort, streamCodexChat, streamCodexEdit, streamOpenCodeChat, streamProvider } from "../providers/stream.js";
 import type { StreamEvent } from "../providers/stream.js";
 import type { ProviderAdapter, ProviderUsageEvent } from "../providers/types.js";
-import type { FinishedRunStatus, ProjectFolder, ProviderId, Run, RunEventData, RunUsage } from "../shared/contracts.js";
+import type {
+  FinishedRunStatus, ProjectFolder, ProviderId, Run, RunEventData, RunUsage, WorktreeState,
+} from "../shared/contracts.js";
 import { compareTurns, conversationContext, conversationId, followUpPrompt, runMode } from "../shared/conversations.js";
+import { supportsWorktreeEditing } from "../shared/editing.js";
 import { asRecord } from "../shared/records.js";
+import type { WorktreeManager } from "./worktree.js";
 
 const MAX_PROMPT_LENGTH = 8_000;
 const MAX_MESSAGE_LENGTH = 16_000;
@@ -51,6 +55,7 @@ function failureText(value: unknown, env: NodeJS.ProcessEnv, secrets: readonly s
 export function createRunService(
   publish: (run: Run) => void,
   optionsForProvider: (provider: ProviderId) => { executable?: string; model?: string } = () => ({}),
+  worktrees?: WorktreeManager,
 ) {
   const history: Run[] = [];
   let active: ActiveRun | undefined;
@@ -74,6 +79,7 @@ export function createRunService(
 
   async function execute(run: Run, provider: ProviderAdapter, prompt: string, signal: AbortSignal, effort?: string, chatModel?: string) {
     const env = providerEnvironment(provider);
+    let worktreePath: string | undefined;
     const codexChat = run.mode === "chat" && provider.id === "codex";
     if (codexChat) {
       delete env.CODEX_API_KEY;
@@ -83,6 +89,49 @@ export function createRunService(
     const replies = new Map<string, Extract<Run["events"][number], { text: string }>>();
     let pendingUpdate: ReturnType<typeof setTimeout> | undefined;
     let isolatedDirectory: string | undefined;
+
+    async function prepareWorktree() {
+      if (!run.edit) return;
+      if (!worktrees) throw new Error("Editing in a worktree is not available in this build.");
+      const project = run.folder?.path;
+      if (!project) throw new Error("Choose a project folder first.");
+      const existing = run.worktree;
+      if (existing) {
+        if (!(await worktrees.exists(existing))) {
+          throw new Error("The worktree for this chat is no longer available. Start a new Code chat to create another.");
+        }
+        worktreePath = existing.path;
+        append(run, { type: "notice", text: `Editing in ${existing.branch} from ${existing.baseCommit.slice(0, 10)}.` });
+        return;
+      }
+      append(run, { type: "notice", text: "Creating an editing branch and Git worktree…" });
+      const created = await worktrees.create(project);
+      run.worktree = { ...created };
+      worktreePath = created.path;
+      append(run, {
+        type: "notice",
+        text: `Created ${created.branch} from ${created.baseCommit.slice(0, 10)}.\nWorktree: ${created.path}`,
+      });
+    }
+
+    async function attachDiff() {
+      const worktree = run.worktree;
+      if (!run.edit || !worktree || !worktreePath || !worktrees) return;
+      try {
+        const diff = await worktrees.diff(worktree);
+        run.diff = diff;
+        const count = diff.files.length;
+        append(run, {
+          type: "notice",
+          text: count ? `Review ${count} changed ${count === 1 ? "file" : "files"} in ${worktree.branch}.`
+            : "No file changes were recorded in the worktree.",
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        append(run, { type: "error", text: failureText(message, env) || "Honeycomb could not read the worktree changes." });
+      }
+    }
+
     function receive(event: StreamEvent) {
         if (signal.aborted) return;
         if (event.type === "usage") {
@@ -91,6 +140,9 @@ export function createRunService(
             Object.assign(run.usage, usage);
             append(run, { type: "usage", ...usage });
           }
+        } else if (event.type === "test_result") {
+          const text = displayText(event.text, MAX_MESSAGE_LENGTH);
+          if (text) append(run, { type: "test_result", text, passed: event.passed });
         } else if ("id" in event) {
           const existing = replies.get(event.id);
           const text = event.text.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "");
@@ -119,11 +171,15 @@ export function createRunService(
     try {
       const options = optionsForProvider(provider.id);
       const { connector, executable } = await checkProvider(provider, signal, options.executable);
-      if (signal.aborted) return finish(run, "cancelled", "Run stopped.");
+      if (signal.aborted) {
+        await attachDiff();
+        return finish(run, "cancelled", "Run stopped.");
+      }
       if (!executable) throw new Error(connector.detail ?? provider.name + " was not found on PATH.");
+      await prepareWorktree();
       if (run.mode === "chat") isolatedDirectory = await mkdtemp(join(tmpdir(), "honeycomb-chat-"));
       const transport = {
-        ...executable, cwd: run.folder?.path ?? isolatedDirectory, env, timeoutMs: TIMEOUT_MS, signal,
+        ...executable, cwd: worktreePath ?? run.folder?.path ?? isolatedDirectory, env, timeoutMs: TIMEOUT_MS, signal,
         onStderr(tail: string) {
           if (providerNotice || signal.aborted) return;
           providerNotice = provider.diagnoseStderr?.(tail);
@@ -132,19 +188,32 @@ export function createRunService(
       };
       if (codexChat) {
         await streamCodexChat(transport, prompt, chatModel, receive, effort);
+      } else if (provider.id === "codex" && run.edit) {
+        if (!worktreePath) throw new Error("Codex editing requires a Git worktree.");
+        await streamCodexEdit({ ...transport, cwd: worktreePath }, prompt, options.model, receive, effort);
       } else if (provider.id === "claude") {
-        await streamClaude(transport, prompt, { model: options.model, effort, chat: run.mode === "chat" }, receive);
+        await streamClaude(transport, prompt, {
+          model: options.model, effort, chat: run.mode === "chat", edit: run.edit === true,
+        }, receive);
       } else if (run.mode === "chat") {
         await streamOpenCodeChat(transport, prompt, options.model, connector.version, receive, effort);
       } else {
         await streamProvider(provider.id, transport, prompt, options.model, connector.version, receive, effort);
       }
-      if (signal.aborted) return finish(run, "cancelled", "Run stopped.");
+      if (signal.aborted) {
+        await attachDiff();
+        return finish(run, "cancelled", "Run stopped.");
+      }
+      await attachDiff();
       finish(run, "completed", "Run completed.");
     } catch (error) {
-      if (signal.aborted) return finish(run, "cancelled", "Run stopped.");
+      if (signal.aborted) {
+        await attachDiff();
+        return finish(run, "cancelled", "Run stopped.");
+      }
       const message = error instanceof Error ? error.message : error;
       append(run, { type: "error", text: failureText(providerNotice ?? message, env, provider.secretEnvironment) || "The provider could not complete the run." });
+      await attachDiff();
       finish(run, "failed", "Run failed.");
     } finally {
       clearTimeout(pendingUpdate);
@@ -204,8 +273,13 @@ export function createRunService(
         throw new Error(`Enter a task of 1 to ${MAX_PROMPT_LENGTH.toLocaleString("en-US")} characters.`);
       }
 
+      const edit = payload?.edit === true;
       const thread = payload?.conversationId;
       if (thread !== undefined && typeof thread !== "string") throw new Error("Invalid chat.");
+      if (edit && mode !== "code") throw new Error("Switch to Code to edit in a Git worktree.");
+      if (edit && !supportsWorktreeEditing(provider.id)) {
+        throw new Error("Choose Codex or Claude Code to edit in a Git worktree.");
+      }
       const turns = thread === undefined ? [] : conversation(thread);
       const first = turns[0];
       if (thread !== undefined && !first) throw new Error("This chat is no longer saved.");
@@ -214,6 +288,8 @@ export function createRunService(
       }
       if (first && turns.some((turn) => turn.providerId !== provider.id)) throw new Error(`Continue this chat with ${first.providerName}.`);
       const context = first ? conversationContext(turns) : undefined;
+      // Follow-up edits continue in the worktree this chat already opened, if it still exists.
+      const worktree = edit ? turns.find((turn) => turn.worktree && turn.worktree.state !== "discarded")?.worktree : undefined;
       const run: Run = {
         id: randomUUID(),
         ...(thread === undefined ? {} : { conversationId: thread, turnIndex: turns.length, context: context?.summary }),
@@ -221,6 +297,8 @@ export function createRunService(
         providerName: provider.name,
         mode,
         folder: mode === "code" ? folder : undefined,
+        ...(edit ? { edit: true } : {}),
+        ...(worktree ? { worktree: { ...worktree } } : {}),
         prompt,
         startedAt: new Date().toISOString(),
         status: "running",
@@ -241,6 +319,17 @@ export function createRunService(
       active.run.status = "stopping";
       append(active.run, { type: "stopping", text: "Stopping the provider." });
       active.controller.abort();
+    },
+    setWorktreeState(worktreeId: string, state: WorktreeState) {
+      let changed = 0;
+      for (const run of history) {
+        if (run.worktree?.id !== worktreeId) continue;
+        run.worktree = { ...run.worktree, state };
+        run.revision++;
+        publish(run);
+        changed++;
+      }
+      return changed;
     },
     hasActiveRun() {
       return Boolean(active);

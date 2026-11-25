@@ -9,12 +9,20 @@ import type { ProviderUsageEvent } from "./types.js";
 export type StreamEvent =
   | { type: "delta" | "message"; id: string; text: string }
   | { type: "tool_call" | "tool_result"; text: string }
+  | { type: "test_result"; text: string; passed: boolean }
   | ProviderUsageEvent;
 
 type Transport = Parameters<typeof runJsonRpc>[0];
 type Publish = (event: StreamEvent) => void;
 
-function codexStream(transport: Transport, prompt: string, model: string | undefined, publish: Publish, effort?: string, chat = false) {
+function codexStream(transport: Transport, prompt: string, model: string | undefined, publish: Publish, effort?: string,
+  mode: "review" | "chat" | "edit" = "review") {
+  const chat = mode === "chat";
+  const cwd = transport.cwd;
+  if (mode === "edit" && !cwd) throw new Error("Codex editing requires a Git worktree.");
+  const sandboxPolicy = mode === "edit" && cwd ? {
+    type: "workspaceWrite", writableRoots: [cwd], networkAccess: false, excludeTmpdirEnvVar: true, excludeSlashTmp: true,
+  } : undefined;
   let notifyTurn: (error?: Error) => void = () => {};
   const turnDone = new Promise<Error | undefined>((resolve) => { notifyTurn = resolve; });
   const chatFlags = chat ? [
@@ -79,15 +87,19 @@ function codexStream(transport: Transport, prompt: string, model: string | undef
       }
     }
     const response = await rpc.request("thread/start", {
-      cwd: transport.cwd, model, ephemeral: true, approvalPolicy: "never", sandbox: "read-only",
+      cwd, model, ephemeral: true, approvalPolicy: "never", sandbox: sandboxPolicy ? "workspace-write" : "read-only",
       ...(chat ? {
         environments: [],
         developerInstructions: "Answer the user's question directly in text. Do not use tools, run commands, or access files.",
       } : {}),
+      ...(sandboxPolicy ? { developerInstructions: "Make the requested changes in the current Git worktree. Leave the original checkout and other branches unchanged. Summarize changes and test results." } : {}),
     });
     const threadId = asRecord(response.thread)?.id;
     if (typeof threadId !== "string") throw new Error("Codex did not start a thread.");
-    await rpc.request("turn/start", { threadId, effort, input: [{ type: "text", text: prompt, text_elements: [] }] });
+    await rpc.request("turn/start", {
+      threadId, effort, input: [{ type: "text", text: prompt, text_elements: [] }],
+      ...(sandboxPolicy ? { cwd, approvalPolicy: "never", sandboxPolicy } : {}),
+    });
     const failure = await turnDone;
     if (failure) throw failure;
   });
@@ -261,5 +273,9 @@ export function streamOpenCodeChat(
 }
 
 export function streamCodexChat(transport: Transport, prompt: string, model: string | undefined, publish: Publish, effort?: string) {
-  return codexStream(transport, prompt, model, publish, effort, true);
+  return codexStream(transport, prompt, model, publish, effort, "chat");
+}
+
+export function streamCodexEdit(transport: Transport & { cwd: string }, prompt: string, model: string | undefined, publish: Publish, effort?: string) {
+  return codexStream(transport, prompt, model, publish, effort, "edit");
 }

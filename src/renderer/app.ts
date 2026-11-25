@@ -1,8 +1,9 @@
 import type {
-  Connector, ConnectorStatus, ConversationContextSummary, HoneycombApi, ModelCatalog, ModelSelection, ProjectFolder, ProviderId, Run, RunStatus, RunUsage,
-  SidebarMenuRequest, WorkspaceMode,
+  Connector, ConnectorStatus, ConversationContextSummary, DiffFile, HoneycombApi, ModelCatalog, ModelSelection, ProjectFolder, ProviderId, Run, RunStatus,
+  RunUsage, RunWorktree, SidebarMenuRequest, WorkspaceMode,
 } from "../shared/contracts.js";
 import { compareTurns, conversationContext, conversationId, runMode } from "../shared/conversations.js";
+import { supportsWorktreeEditing } from "../shared/editing.js";
 
 declare global {
   interface Window {
@@ -25,6 +26,8 @@ const chatModelField = get("chat-model", HTMLSelectElement);
 const thinkingField = get("thinking-level", HTMLSelectElement);
 const connectorModelField = get("connector-model", HTMLSelectElement);
 const runButton = get("run-task", HTMLButtonElement);
+const accessPicker = get("project-access", HTMLSelectElement);
+const editAccessOption = get("project-access-edit", HTMLOptionElement);
 const chatStatus = get("chat-status");
 const modeButtons = document.querySelectorAll<HTMLButtonElement>("[data-mode]");
 const projectPicker = get("composer-project-picker", HTMLSelectElement);
@@ -69,6 +72,7 @@ let mode: WorkspaceMode = "code";
 let switchingMode = false;
 let codexChatModel = "";
 const drafts = new Map<string, string>();
+const editAccess = new Set<string>();
 let draftKey: string | undefined;
 const lastChatByMode: Partial<Record<WorkspaceMode, string | undefined>> = {};
 let projects: ProjectFolder[] = [];
@@ -88,6 +92,7 @@ let connectorBusy = false;
 let choosing = false;
 let checking = false;
 let starting = false;
+let worktreeBusy = false;
 let actionError = "";
 let lastThreadId: string | undefined;
 let connectors: Connector[] = [
@@ -214,6 +219,14 @@ function renderControls() {
   stop.textContent = stop.disabled ? "Stopping…" : "Stop run";
   runButton.disabled = needsProject || busy || choosing || modelPending ||
     !promptField.value.trim() || provider?.status !== "detected";
+  const canEdit = mode === "code" && supportsWorktreeEditing(providerId);
+  const editing = canEdit && draftKey !== undefined && editAccess.has(draftKey);
+  get("composer-access").hidden = mode !== "code";
+  accessPicker.disabled = busy || choosing;
+  accessPicker.title = canEdit ? "Choose whether to review or edit in a separate Git worktree." : "OpenCode supports read-only review in Honeycomb.";
+  editAccessOption.disabled = !canEdit;
+  accessPicker.value = editing ? "edit" : "review";
+  get("send-label").textContent = editing ? "Send edit" : selectedChatId || mode === "chat" ? "Send" : "Run task";
   chatStatus.dataset.error = String(Boolean(actionError));
 
   let message = actionError;
@@ -257,6 +270,7 @@ async function selectWorkspaceProject(
       projects.push(selection);
     }
     const keepChat = register && !startNew && folder?.path === selection.path;
+    if (folder?.path !== selection.path || (startNew && selectedChatId)) editAccess.delete("new:code");
     folder = selection;
     if (!keepChat) selectedChatId = startNew ? undefined : chatId && chatTurns(chatId).length ? chatId : projectChats()[0]?.id;
     newProjectPath = selectedChatId ? undefined : selection.path;
@@ -300,6 +314,7 @@ async function showSidebarMenu(request: SidebarMenuRequest, button: HTMLButtonEl
         draftKey = undefined;
       }
       drafts.delete(`chat:${id}`);
+      editAccess.delete(`chat:${id}`);
     }
     actionError = "";
     const restoreFocus = button === document.activeElement || document.activeElement === document.body;
@@ -446,9 +461,11 @@ function runActivity(run: Run) {
   const details = element("details", "tool-activity");
   const summary = element("summary", "", "Activity");
   const toolCalls = run.events.filter((event) => event.type === "tool_call").length;
+  const tests = run.events.filter((event) => event.type === "test_result").length;
   const errors = run.events.filter((event) => event.type === "error").length;
   const highlights = [statusLabels[run.status]];
   if (toolCalls) highlights.push(countLabel(toolCalls, "tool call"));
+  if (tests) highlights.push(countLabel(tests, "test result"));
   if (errors) highlights.push(countLabel(errors, "error"));
   summary.append(element("span", "tool-count", highlights.join(" · ")));
   const list = element("ol");
@@ -472,11 +489,136 @@ function runActivity(run: Run) {
 }
 
 get("feed").addEventListener("click", (event) => {
-  const link = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>("a[href]") : null;
-  if (!link) return;
-  event.preventDefault();
-  if (/^https?:$/.test(link.protocol)) void api.openReplyLink(link.href).catch(showError);
+  const target = event.target instanceof Element ? event.target : null;
+  const link = target?.closest<HTMLAnchorElement>("a[href]");
+  if (link) {
+    event.preventDefault();
+    if (/^https?:$/.test(link.protocol)) void api.openReplyLink(link.href).catch(showError);
+    return;
+  }
+  const action = target?.closest<HTMLButtonElement>("button[data-worktree]");
+  const id = action?.dataset.worktreeId;
+  const kind = action?.dataset.worktree;
+  if (!action || !id || (kind !== "keep" && kind !== "discard")) return;
+  void worktreeAction(kind, id);
 });
+
+async function worktreeAction(action: "keep" | "discard", id: string) {
+  if (worktreeBusy) return;
+  worktreeBusy = true;
+  actionError = "";
+  renderChats();
+  try {
+    if (action === "keep") await api.keepWorktree(id);
+    else await api.discardWorktree(id);
+  } catch (error) {
+    showError(error);
+  } finally {
+    worktreeBusy = false;
+    renderChats();
+  }
+}
+
+function commitLabel(commit: string) {
+  return commit.slice(0, 10);
+}
+
+const diffLabels = {
+  added: "Added", modified: "Modified", deleted: "Deleted", renamed: "Renamed",
+} satisfies Record<DiffFile["status"], string>;
+const worktreeLabels = {
+  active: "In worktree", kept: "Kept for later", discarded: "Discarded",
+} satisfies Record<RunWorktree["state"], string>;
+
+function diffPatch(patch: string) {
+  const pre = element("pre", "diff-patch");
+  if (!patch.trim()) {
+    pre.append(element("span", "diff-meta", "No recorded lines for this file."));
+    return pre;
+  }
+  for (const line of patch.split("\n")) {
+    const className = /^(diff --git|index |--- |\+\+\+ |@@|new file|deleted file|similarity |rename )/.test(line) ? "diff-meta"
+      : line.startsWith("+") ? "diff-add"
+      : line.startsWith("-") ? "diff-remove" : "";
+    const row = element("span", className);
+    row.textContent = line + "\n";
+    pre.append(row);
+  }
+  return pre;
+}
+
+function runChanges(run: Run, latest: boolean) {
+  const worktree = run.worktree;
+  if (!worktree) return undefined;
+  const section = element("section", "diff-review");
+  const header = element("div", "diff-head");
+  header.append(element("h3", "", "Changes in worktree"));
+  const state = element("span", "diff-state", worktreeLabels[worktree.state]);
+  state.dataset.state = worktree.state;
+  header.append(state);
+  const meta = element("p", "diff-meta", `${worktree.branch} · from ${commitLabel(worktree.baseCommit)}`);
+  const location = element("p", "diff-path", worktree.path);
+  location.title = worktree.path;
+  section.append(header, meta, location);
+
+  const diff = run.diff;
+  if (!diff) {
+    section.append(element("p", "diff-empty", "Changed files appear here when the run finishes."));
+  } else if (!diff.files.length) {
+    section.append(element("p", "diff-empty", "No file changes were recorded in the worktree."));
+  } else {
+    const files = element("div", "diff-files");
+    for (const file of diff.files) {
+      const item = element("details", "diff-file");
+      item.open = true;
+      const summary = element("summary", "");
+      summary.append(element("span", "diff-status", diffLabels[file.status]), element("span", "diff-name", file.path));
+      item.append(summary, diffPatch(file.patch));
+      if (file.truncated) item.append(element("p", "diff-note", "This diff was shortened."));
+      files.append(item);
+    }
+    section.append(files);
+    if (diff.truncated) section.append(element("p", "diff-note", "Some diffs were shortened. Open the worktree for the full change."));
+  }
+
+  if (latest && worktree.state !== "discarded") {
+    const actions = element("div", "diff-actions");
+    if (worktree.state === "active") {
+      const keep = element("button", "button button-small", "Keep worktree");
+      keep.type = "button";
+      keep.dataset.worktree = "keep";
+      keep.dataset.worktreeId = worktree.id;
+      keep.disabled = worktreeBusy;
+      actions.append(keep);
+    }
+    const discard = element("button", "button button-small", "Discard worktree");
+    discard.type = "button";
+    discard.dataset.worktree = "discard";
+    discard.dataset.worktreeId = worktree.id;
+    discard.disabled = worktreeBusy;
+    actions.append(discard);
+    section.append(actions,
+      element("p", "diff-note", "Your checkout is unchanged. Discard removes only this worktree and branch after confirmation."));
+  }
+  return section;
+}
+
+function runTests(run: Run) {
+  const results = run.events.filter(
+    (event): event is Extract<Run["events"][number], { type: "test_result" }> => event.type === "test_result",
+  );
+  if (!results.length) return undefined;
+  const section = element("section", "test-results");
+  section.append(element("h3", "", "Test results"));
+  const list = element("ul");
+  for (const result of results) {
+    const item = element("li", result.passed ? "test-pass" : "test-fail", result.text);
+    item.dataset.passed = String(result.passed);
+    list.append(item);
+  }
+  section.append(list);
+  return section;
+}
 
 function renderThread(turns: readonly Run[]) {
   const thread = get("thread");
@@ -498,6 +640,10 @@ function renderThread(turns: readonly Run[]) {
     for (const event of run.events) {
       if (event.type === "message") turn.append(agentReply(run.providerName, event.text));
     }
+    const tests = runTests(run);
+    if (tests) turn.append(tests);
+    const changes = runChanges(run, index === turns.length - 1);
+    if (changes) turn.append(changes);
     turn.append(runActivity(run));
     if (existing) {
       const restoreFocus = existing.contains(document.activeElement);
@@ -544,11 +690,15 @@ function renderDetails(run: Run | undefined) {
   const emptyUsage = active ? "Waiting for usage data." : "The provider reported no usage.";
   usage.append(totals.length ? facts(totals) : element("p", "empty-details", emptyUsage));
 
-  panel.replaceChildren(
-    heading,
-    ...(run.folder ? [facts([["Project", run.folder.name], ["Workflow", "Solo"]])] : []),
-    usage,
-  );
+  const details: Array<[string, string]> = run.folder ? [["Project", run.folder.name], ["Workflow", "Solo"]] : [];
+  if (run.worktree) {
+    details.push(
+      ["Branch", run.worktree.branch],
+      ["Base commit", commitLabel(run.worktree.baseCommit)],
+      ["Worktree", run.worktree.path],
+    );
+  }
+  panel.replaceChildren(heading, ...(details.length ? [facts(details)] : []), usage);
 }
 
 function renderComposerProject(first: Run | undefined) {
@@ -595,7 +745,6 @@ function renderChats() {
   const providerChanged = first && providerField.value !== first.providerId;
   if (providerChanged) providerField.value = first.providerId;
   const continueChat = Boolean(first);
-  get("send-label").textContent = continueChat || mode === "chat" ? "Send" : "Run task";
   promptField.placeholder = continueChat ? "Ask a follow-up…" : mode === "chat" ? "Ask a question…" : "Ask about your project…";
   const title = get("chat-title");
   title.textContent = first?.prompt.replace(/\s+/g, " ") ?? (mode === "chat" ? "New chat" : "New task");
@@ -986,7 +1135,10 @@ get("stop-run").addEventListener("click", async () => {
 });
 get("new-task").addEventListener("click", () => {
   actionError = "";
-  if (mode === "code") newProjectPath = undefined;
+  if (mode === "code") {
+    newProjectPath = undefined;
+    editAccess.delete("new:code");
+  }
   selectChat(undefined);
   (mode === "code" ? projectPicker : promptField).focus();
 });
@@ -1011,13 +1163,38 @@ for (const example of document.querySelectorAll<HTMLButtonElement>("[data-prompt
     promptField.focus();
   });
 }
+promptField.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || event.isComposing || event.altKey || event.metaKey) return;
+
+  if (event.ctrlKey) {
+    event.preventDefault();
+    const { selectionStart, selectionEnd, value, maxLength } = promptField;
+    if (maxLength >= 0 && value.length - (selectionEnd - selectionStart) >= maxLength) return;
+    promptField.setRangeText("\n", selectionStart, selectionEnd, "end");
+    promptField.dispatchEvent(new Event("input", { bubbles: true }));
+    return;
+  }
+  if (event.shiftKey) return;
+
+  event.preventDefault();
+  if (!event.repeat && !runButton.disabled) promptField.form?.requestSubmit(runButton);
+});
+
 promptField.addEventListener("input", () => {
   actionError = "";
   renderControls();
 });
 providerField.addEventListener("change", () => {
   actionError = "";
+  if (draftKey && !supportsWorktreeEditing(chatProviderId())) editAccess.delete(draftKey);
   renderComposerProvider();
+});
+accessPicker.addEventListener("change", () => {
+  if (!draftKey) return;
+  if (accessPicker.value === "edit" && !editAccessOption.disabled) editAccess.add(draftKey);
+  else editAccess.delete(draftKey);
+  actionError = "";
+  renderControls();
 });
 thinkingField.addEventListener("change", () => {
   const provider = chatProviderId();
@@ -1026,10 +1203,10 @@ thinkingField.addEventListener("change", () => {
   renderComposerProvider();
 });
 
-get("composer").addEventListener("submit", async (event) => {
-  event.preventDefault();
+async function startTask() {
   const connector = connectors.find((entry) => entry.id === providerField.value);
-  if (!connector || runButton.disabled) return;
+  if (!connector || starting || runButton.disabled) return;
+  const edit = mode === "code" && supportsWorktreeEditing(connector.id) && accessPicker.value === "edit";
   const draft = promptField.value;
   const chatId = selectedChatId;
   starting = true;
@@ -1038,8 +1215,13 @@ get("composer").addEventListener("submit", async (event) => {
   try {
     const runId = await api.startRun({
       providerId: connector.id, conversationId: chatId, prompt: draft, effort: thinkingField.value, model: chatModelField.value,
+      ...(edit ? { edit: true } : {}),
     });
     if (promptField.value === draft) promptField.value = "";
+    if (!chatId && edit) {
+      editAccess.delete("new:code");
+      editAccess.add(`chat:${runId}`);
+    }
     selectedChatId = chatId ?? runId;
     if (mode === "code") newProjectPath = undefined;
   } catch (error) {
@@ -1048,6 +1230,11 @@ get("composer").addEventListener("submit", async (event) => {
     starting = false;
     renderChats();
   }
+}
+
+get("composer").addEventListener("submit", (event) => {
+  event.preventDefault();
+  void startTask();
 });
 
 api.onRunChanged((run) => {

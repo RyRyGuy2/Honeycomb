@@ -40,9 +40,42 @@ export interface RunUsage {
 export type FinishedRunStatus = "completed" | "failed" | "cancelled";
 export type RunStatus = "running" | "stopping" | FinishedRunStatus;
 
+export type WorktreeState = "active" | "kept" | "discarded";
+
+/** The branch and worktree an editing run works in. */
+export interface RunWorktree {
+  id: string;
+  branch: string;
+  path: string;
+  baseCommit: string;
+  state: WorktreeState;
+}
+
+/** A worktree record Honeycomb can clean up later. */
+export interface WorktreeRecord extends RunWorktree {
+  repository: string;
+  createdAt: string;
+}
+
+export type DiffStatus = "added" | "modified" | "deleted" | "renamed";
+
+export interface DiffFile {
+  path: string;
+  status: DiffStatus;
+  patch: string;
+  truncated?: boolean;
+}
+
+export interface RunDiff {
+  baseCommit: string;
+  files: DiffFile[];
+  truncated?: boolean;
+}
+
 export type RunEventData =
   | { type: "started" | "stopping" | "message" | "tool_call" | "tool_result" | "notice" | "error"; text: string }
   | { type: "finished"; status: FinishedRunStatus; text: string }
+  | { type: "test_result"; text: string; passed: boolean }
   | ({ type: "usage" } & RunUsage);
 
 export type RunEvent = RunEventData & {
@@ -66,6 +99,10 @@ export interface Run {
   providerName: string;
   folder?: ProjectFolder;
   mode?: WorkspaceMode;
+  /** True when this turn was asked to edit inside an isolated Git worktree. */
+  edit?: boolean;
+  worktree?: RunWorktree;
+  diff?: RunDiff;
   prompt: string;
   startedAt: string;
   finishedAt?: string;
@@ -82,6 +119,8 @@ export interface StartRunRequest {
   effort?: string;
   mode?: WorkspaceMode;
   model?: string;
+  /** Request an edit in a dedicated Git worktree instead of a read-only review. */
+  edit?: boolean;
 }
 
 export interface AppState {
@@ -89,6 +128,7 @@ export interface AppState {
   projects: ProjectFolder[];
   runs: Run[];
   mode?: WorkspaceMode;
+  worktrees?: WorktreeRecord[];
 }
 
 export interface SidebarMenuRequest {
@@ -112,6 +152,8 @@ export interface IpcCalls {
   "start-run": (request: StartRunRequest) => string;
   "open-reply-link": (url: string) => void;
   "stop-run": (runId: string) => void;
+  "keep-worktree": (worktreeId: string) => boolean;
+  "discard-worktree": (worktreeId: string) => boolean;
   "sidebar-menu": (request: SidebarMenuRequest) => boolean;
 }
 
@@ -134,6 +176,8 @@ export interface HoneycombApi {
   startRun: Invoke<"start-run">;
   openReplyLink: Invoke<"open-reply-link">;
   stopRun: Invoke<"stop-run">;
+  keepWorktree: Invoke<"keep-worktree">;
+  discardWorktree: Invoke<"discard-worktree">;
   showSidebarMenu: Invoke<"sidebar-menu">;
   onRunChanged(callback: (run: Run) => void): () => void;
 }

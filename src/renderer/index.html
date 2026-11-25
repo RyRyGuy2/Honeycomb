@@ -135,6 +135,13 @@
             </p>
             <div class="composer-actions">
               <div class="composer-options">
+                <div id="composer-access" hidden>
+                  <label class="visually-hidden" for="project-access">Project access</label>
+                  <select id="project-access" class="composer-select">
+                    <option value="review">Read-only</option>
+                    <option value="edit" id="project-access-edit">Edit in worktree</option>
+                  </select>
+                </div>
                 <label class="visually-hidden" for="provider">Connector</label>
                 <select id="provider" class="composer-select">
                   <option value="codex">Codex</option>

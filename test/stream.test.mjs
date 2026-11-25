@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { streamCodexChat, streamOpenCodeChat, streamProvider } from "../dist/providers/stream.js";
+import { streamCodexChat, streamCodexEdit, streamOpenCodeChat, streamProvider } from "../dist/providers/stream.js";
 
 const fixture = String.raw`
   const lines = require("node:readline").createInterface({ input: process.stdin });
   let codex;
   let experimentalApi;
   let chat = false;
+  const edit = process.env.FIXTURE_EDIT === "1";
   let pendingPrompt;
   const write = (value) => console.log(JSON.stringify(value));
   lines.on("line", (line) => {
@@ -26,7 +27,8 @@ const fixture = String.raw`
       chat = true;
       reply({ account: process.env.FIXTURE_ACCOUNT ? { type: process.env.FIXTURE_ACCOUNT } : null });
     } else if (method === "thread/start") {
-      if (params.sandbox !== "read-only" || params.approvalPolicy !== "never") process.exit(2);
+      if (params.sandbox !== (edit ? "workspace-write" : "read-only") || params.approvalPolicy !== "never") process.exit(2);
+      if (edit && (params.cwd !== process.cwd() || !params.ephemeral)) process.exit(2);
       if (chat && (!experimentalApi || !params.ephemeral || params.environments?.length !== 0 ||
         params.model !== (process.env.FIXTURE_MODEL || undefined) ||
         !params.developerInstructions?.includes("Answer the user's question directly in text") ||
@@ -44,6 +46,12 @@ const fixture = String.raw`
       reply();
     } else if (method === "turn/start" || method === "session/prompt") {
       if (codex) {
+        if (edit) {
+          const policy = params.sandboxPolicy;
+          if (params.cwd !== process.cwd() || params.approvalPolicy !== "never" || policy?.type !== "workspaceWrite" ||
+            policy.writableRoots?.length !== 1 || policy.writableRoots[0] !== process.cwd() || policy.networkAccess !== false ||
+            !policy.excludeTmpdirEnvVar || !policy.excludeSlashTmp) process.exit(2);
+        } else if (params.sandboxPolicy) process.exit(2);
         reply({ turn: { id: "turn-1" } });
         if (chat) {
           if (params.effort !== "low" || params.input[0].type !== "text") process.exit(2);
@@ -113,6 +121,15 @@ test("Codex Chat uses the CLI's ChatGPT login and streams text", async () => {
   await assert.rejects(streamCodexChat({ ...transport, env: { ...process.env, FIXTURE_ACCOUNT: "apiKey" } },
     "A question", "gpt-5.4", (event) => unexpected.push(event), "low"), /codex login/);
   assert.deepEqual(unexpected, []);
+});
+
+test("Codex edit turns restrict the write sandbox to the worktree", async () => {
+  const events = [];
+  await streamCodexEdit({
+    file: process.execPath, args: ["-e", fixture, "--"], cwd: process.cwd(),
+    timeoutMs: 5000, env: { ...process.env, FIXTURE_EDIT: "1" },
+  }, "Fix a test", undefined, (event) => events.push(event));
+  assert.equal(events.find(({ type }) => type === "message")?.text, "**Live reply**");
 });
 
 test("OpenCode Chat passes slash commands as text and stops an unexpected tool request", async () => {

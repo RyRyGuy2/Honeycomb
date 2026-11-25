@@ -29,6 +29,19 @@ test("Code runs are headless, read-only and ignore project settings, MCP servers
   assert.ok(claude.requiredHelpFlags.includes("--tools"));
 });
 
+test("worktree edits allow file changes and commands while keeping the other tools off", () => {
+  const args = claudeArgs({ edit: true });
+  assert.equal(valueOf(args, "--permission-mode"), "acceptEdits");
+  const tools = valueOf(args, "--tools").split(",");
+  for (const tool of ["Read", "Grep", "Glob", "Edit", "MultiEdit", "Write", "NotebookEdit", "Bash"]) {
+    assert.ok(tools.includes(tool), tool);
+  }
+  assert.deepEqual(listAfter(args, "--allowedTools"), tools);
+  const denied = listAfter(args, "--disallowedTools");
+  for (const tool of ["WebFetch", "WebSearch", "Task", "Skill", "Read(**/.env)"]) assert.ok(denied.includes(tool), tool);
+  assert.ok(!denied.includes("Edit") && !denied.includes("Bash"));
+});
+
 test("Chat runs turn every tool off and pass the model and thinking level", () => {
   const args = claudeArgs({ chat: true, model: parseClaudeModel(" opus "), effort: parseEffort("xhigh", "claude") });
   assert.equal(valueOf(args, "--tools"), "");
@@ -128,4 +141,38 @@ test("a streamed sign-in failure rejects with sign-in guidance and shows no erro
   const { run, events } = await runFixture(t, { model: "broken" });
   await assert.rejects(run, /isn't signed in/);
   assert.equal(events.some((event) => event.type === "message" || event.type === "delta"), false);
+});
+
+// An edit-mode stand-in: it verifies the worktree flags, then reports a test command and its result.
+const editFixture = String.raw`
+  const args = process.argv.slice(1);
+  const flag = (name) => args[args.indexOf(name) + 1];
+  if (flag("--permission-mode") !== "acceptEdits" || !flag("--tools").includes("Bash")) process.exit(3);
+  let prompt = "";
+  process.stdin.on("data", (chunk) => { prompt += chunk; });
+  process.stdin.on("end", () => {
+    if (prompt !== "Fix it") process.exit(4);
+    const write = (value) => console.log(JSON.stringify(value));
+    write({ type: "assistant", message: { id: "m1", model: "claude", content: [
+      { type: "tool_use", id: "b1", name: "Bash", input: { command: "npm test" } },
+    ] } });
+    write({ type: "user", message: { content: [
+      { type: "tool_result", tool_use_id: "b1", is_error: false, content: "all tests passed" },
+    ] } });
+    write({ type: "assistant", message: { id: "m2", model: "claude", content: [{ type: "text", text: "Fixed and verified." }] } });
+    write({ type: "result", subtype: "success", is_error: false, usage: {} });
+  });
+`;
+
+test("edit runs report test commands as test results", async (t) => {
+  const cwd = await mkdtemp(join(tmpdir(), "honeycomb-claude-edit-test-"));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  const events = [];
+  await streamClaude(
+    { file: process.execPath, args: ["-e", editFixture, "--"], cwd, env: { PATH: process.env.PATH ?? "" }, timeoutMs: 20_000 },
+    "Fix it", { edit: true }, (event) => events.push(event),
+  );
+  assert.equal(events[0].text, "Claude Code Bash");
+  const result = events.find((event) => event.type === "test_result");
+  assert.deepEqual(result, { type: "test_result", text: "npm test passed.", passed: true });
 });

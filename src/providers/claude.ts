@@ -8,14 +8,24 @@ const SIGN_IN = "Claude Code isn't signed in. Run `claude` in a terminal and use
 const RATE_LIMIT = "Claude's model is rate limited or overloaded. Wait and retry, or select another model in Connectors.";
 const REVIEW_PROMPT = "You are running a read-only review inside Honeycomb. Read and search the project, then answer in text. Leave the workspace unchanged.";
 const CHAT_PROMPT = "You are answering a question inside Honeycomb's Chat mode. No tools are available. Answer the user's question directly in text.";
+const EDIT_PROMPT = "You are editing inside a dedicated Git worktree created by Honeycomb. The working directory is that worktree. Make the requested change there only, run focused tests when they help verify it, then summarize what changed. Do not modify any other checkout.";
 
 // Code runs may only read and search. `--tools` limits which tools exist; the deny rules also override
 // any allow rule in the user's settings and keep secrets out of reads.
 const REVIEW_TOOLS = ["Read", "Grep", "Glob"];
-const DENIED_TOOLS = [
-  "Bash", "Edit", "MultiEdit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Task", "Skill",
+// Edits run in Honeycomb's own worktree, so the CLI may change files and run commands there.
+const EDIT_TOOLS = ["Read", "Grep", "Glob", "Edit", "MultiEdit", "Write", "NotebookEdit", "Bash"];
+const READ_DENIALS = [
   "Read(./.env)", "Read(./.env.*)", "Read(**/.env)", "Read(**/.env.*)",
 ];
+const DENIED_TOOLS = [
+  "Bash", "Edit", "MultiEdit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Task", "Skill",
+  ...READ_DENIALS,
+];
+const EDIT_DENIED_TOOLS = ["WebFetch", "WebSearch", "Task", "Skill", ...READ_DENIALS];
+
+// Commands whose result is reported as a test or check in the reply.
+const TEST_COMMAND = /(?:^|[\s;&|])(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:test|typecheck|type-check|lint|build)\b|(?:^|[\s;&|])(?:npx\s+)?(?:vitest|jest|pytest|mocha|tsc)\b|\bcargo\s+(?:test|check|clippy)\b|\bgo\s+test\b|\bdotnet\s+test\b|\bmake\s+(?:test|check)\b/i;
 export const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 
 // Model aliases always resolve to the latest model of that family in the installed CLI.
@@ -29,6 +39,8 @@ export interface ClaudeRunOptions {
   model?: string;
   effort?: string;
   chat?: boolean;
+  /** Allow edits and commands in the worktree Honeycomb prepared. */
+  edit?: boolean;
 }
 
 interface ClaudeTransport {
@@ -60,7 +72,7 @@ function failureMessage(text: string) {
   return text;
 }
 
-export function claudeArgs({ model, effort, chat = false }: ClaudeRunOptions = {}): string[] {
+export function claudeArgs({ model, effort, chat = false, edit = false }: ClaudeRunOptions = {}): string[] {
   return [
     "-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
     // Keep the folder's .claude settings and hooks, MCP servers, slash commands and saved sessions out of the run.
@@ -68,11 +80,15 @@ export function claudeArgs({ model, effort, chat = false }: ClaudeRunOptions = {
     "--strict-mcp-config",
     "--disable-slash-commands",
     "--no-session-persistence",
-    "--permission-mode", "default",
-    ...(chat
-      ? ["--tools", "", "--append-system-prompt", CHAT_PROMPT]
-      : ["--tools", REVIEW_TOOLS.join(","), "--allowedTools", ...REVIEW_TOOLS, "--disallowedTools", ...DENIED_TOOLS,
-        "--append-system-prompt", REVIEW_PROMPT]),
+    ...(edit
+      ? ["--permission-mode", "acceptEdits", "--tools", EDIT_TOOLS.join(","),
+        "--allowedTools", ...EDIT_TOOLS, "--disallowedTools", ...EDIT_DENIED_TOOLS,
+        "--append-system-prompt", EDIT_PROMPT]
+      : chat
+        ? ["--permission-mode", "default", "--tools", "", "--append-system-prompt", CHAT_PROMPT]
+        : ["--permission-mode", "default", "--tools", REVIEW_TOOLS.join(","),
+          "--allowedTools", ...REVIEW_TOOLS, "--disallowedTools", ...DENIED_TOOLS,
+          "--append-system-prompt", REVIEW_PROMPT]),
     ...(model ? ["--model", model] : []),
     ...(effort ? ["--effort", effort] : []),
   ];
@@ -139,10 +155,19 @@ function toolTarget(input: Record<string, unknown> | undefined) {
   return target ? "\n" + target.slice(0, 500) : "";
 }
 
+function toolOutput(content: unknown) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.map((item) => {
+    const block = asRecord(item);
+    return block?.type === "text" && typeof block.text === "string" ? block.text : "";
+  }).filter(Boolean).join("\n");
+}
+
 export async function streamClaude(
   transport: ClaudeTransport, prompt: string, options: ClaudeRunOptions, publish: (event: StreamEvent) => void,
 ) {
-  const tools = new Map<string, string>();
+  const tools = new Map<string, { name: string; command?: string }>();
   const streamed = new Set<string>();
   let current = "";
   let unnamed = 0;
@@ -174,8 +199,10 @@ export async function streamClaude(
           publish({ type: "message", id: id + ":text-" + index, text: block.text });
         }
         if (block?.type === "tool_use" && typeof block.name === "string") {
-          if (typeof block.id === "string") tools.set(block.id, block.name);
-          publish({ type: "tool_call", text: "Claude Code " + block.name + toolTarget(asRecord(block.input)) });
+          const input = asRecord(block.input);
+          const command = block.name === "Bash" && typeof input?.command === "string" ? input.command : undefined;
+          if (typeof block.id === "string") tools.set(block.id, { name: block.name, ...(command ? { command } : {}) });
+          publish({ type: "tool_call", text: "Claude Code " + block.name + toolTarget(input) });
         }
       });
       return;
@@ -183,8 +210,22 @@ export async function streamClaude(
     if (line.type === "user") {
       for (const block of content) {
         if (block?.type !== "tool_result") continue;
-        const name = (typeof block.tool_use_id === "string" && tools.get(block.tool_use_id)) || "tool";
-        publish({ type: "tool_result", text: "Claude Code " + name + (block.is_error === true ? " failed." : " finished.") });
+        const tool = typeof block.tool_use_id === "string" ? tools.get(block.tool_use_id) : undefined;
+        const failed = block.is_error === true;
+        const command = tool?.command;
+        if (command && TEST_COMMAND.test(command)) {
+          const output = failed
+            ? toolOutput(block.content).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "").trim().slice(-400)
+            : "";
+          publish({
+            type: "test_result",
+            text: `${command.replace(/\s+/g, " ").trim().slice(0, 120)} ${failed ? "failed" : "passed"}.` +
+              (output ? `\n${output}` : ""),
+            passed: !failed,
+          });
+        } else {
+          publish({ type: "tool_result", text: "Claude Code " + (tool?.name ?? "tool") + (failed ? " failed." : " finished.") });
+        }
       }
       return;
     }
