@@ -3,13 +3,13 @@ import type { ReactNode } from "react";
 import type { ConnectorStatus, ModelCatalog, ProjectFolder, ProviderId, Run, RunEvent, RunStatus } from "../shared/contracts.js";
 import {
   activeRun, chatModelDisabled, chatModelValue, chooseFolder, connectorDescriptions, connectorFor, connectorLabels, controls,
-  downloadOpenCode, effortLabel, focusLater, generalChats, getVersion, isCodexChat, loadForView, markdown, newTask, number,
-  openCatalog, openProject, openReplyLink, projectRuns, providerNames, refreshConnectors, refreshModels, saveModel,
-  selectConnector, selectRun, selectedRun, setCatalogQuery, setPrompt, setProvider, setThinking, showView, state, statusLabels,
-  signInClaude, stopRun, submitTask, subscribe, switchMode, testOpenCode, thinking, toggleProject, toggleToolGroup, usageLabels, usd,
+  downloadOpenCode, effortLabel, focusLater, generalThreads, getVersion, isCodexChat, loadForView, markdown, newTask, number,
+  openCatalog, openProject, openReplyLink, projectThreads, providerNames, refreshConnectors, refreshModels, saveModel,
+  selectConnector, selectThread, selectedThread, setCatalogQuery, setPrompt, setProvider, setThinking, showView, state,
+  signInClaude, stopRun, submitTask, subscribe, switchMode, testOpenCode, thinking, toggleProject, toggleToolGroup, usd,
   useConnector,
 } from "./store.js";
-import type { View } from "./store.js";
+import type { Thread, View } from "./store.js";
 
 function StatusDot({ status }: { status: ConnectorStatus | RunStatus }) {
   return <span className="status-dot" aria-hidden="true" data-status={status} />;
@@ -61,20 +61,23 @@ function Rail() {
   );
 }
 
-function HistoryButton({ run, onSelect }: { run: Run; onSelect: () => void }) {
+function ChatButton({ thread, onSelect }: { thread: Thread; onSelect: () => void }) {
+  const working = thread.latest.status === "running" || thread.latest.status === "stopping";
   return (
     <button
-      type="button" className="history-item" title={run.prompt}
-      aria-current={run.id === state.selectedRunId ? "true" : undefined} onClick={onSelect}
+      type="button" className="history-item chat-item" title={thread.title}
+      aria-current={thread.id === state.selectedThreadId ? "true" : undefined} onClick={onSelect}
     >
-      <span className="history-name">{run.prompt.replace(/\s+/g, " ")}</span>
-      <span className="history-meta">{`${run.providerName} · ${statusLabels[run.status]}`}</span>
+      <span className="history-name">{thread.title}</span>
+      {working && <span className="chat-working" aria-label="Working" />}
     </button>
   );
 }
 
+const VISIBLE_CHATS = 5;
+
 function ProjectGroup({ project }: { project: ProjectFolder }) {
-  const chats = projectRuns(project.path);
+  const chats = projectThreads(project.path);
   const expanded = state.expandedProjects.has(project.path);
   return (
     <section className="project-group">
@@ -87,10 +90,10 @@ function ProjectGroup({ project }: { project: ProjectFolder }) {
         <span className="history-name">{project.name}</span>
       </button>
       <div className="project-chats">
-        {(expanded ? chats : chats.slice(0, 3)).map((run) => (
-          <HistoryButton key={run.id} run={run} onSelect={() => void openProject(project, run.id)} />
+        {(expanded ? chats : chats.slice(0, VISIBLE_CHATS)).map((thread) => (
+          <ChatButton key={thread.id} thread={thread} onSelect={() => void openProject(project, thread.id)} />
         ))}
-        {chats.length > 3 && (
+        {chats.length > VISIBLE_CHATS && (
           <button
             type="button" className="history-item history-more" aria-expanded={expanded}
             aria-label={expanded ? `Show fewer chats in ${project.name}` : `Show more chats in ${project.name}`}
@@ -106,10 +109,10 @@ function ProjectGroup({ project }: { project: ProjectFolder }) {
 
 function RunList() {
   if (state.mode === "chat") {
-    const chats = generalChats();
+    const chats = generalThreads();
     return (
       <div id="run-list" className="run-list">
-        {chats.length ? chats.map((run) => <HistoryButton key={run.id} run={run} onSelect={() => selectRun(run.id)} />)
+        {chats.length ? chats.map((thread) => <ChatButton key={thread.id} thread={thread} onSelect={() => selectThread(thread.id)} />)
           : <p>No chats yet.</p>}
       </div>
     );
@@ -218,11 +221,22 @@ function ToolActivity({ events, groupKey }: { events: RunEvent[]; groupKey: stri
   );
 }
 
-function FeedEntries({ run }: { run: Run }) {
+/** A short footer for a finished turn: who answered and what it reported using. */
+function turnMeta(run: Run) {
+  const parts: string[] = [run.providerName];
+  if (run.model) parts.push(run.model);
+  const tokens = (run.usage.inputTokens ?? 0) + (run.usage.outputTokens ?? 0);
+  if (tokens) parts.push(`${number.format(tokens)} tokens`);
+  if (run.usage.costUsd) parts.push(usd.format(run.usage.costUsd));
+  return parts.join(" · ");
+}
+
+function Turn({ run }: { run: Run }) {
   const entries: ReactNode[] = [
-    <article key="prompt" className="feed-entry user"><h2>You</h2><p>{run.prompt}</p></article>,
+    <div key="prompt" className="message-user"><p>{run.prompt}</p></div>,
   ];
   let tools: RunEvent[] = [];
+  let replied = false;
   const flushTools = () => {
     const first = tools[0];
     if (!first) return;
@@ -231,36 +245,49 @@ function FeedEntries({ run }: { run: Run }) {
     tools = [];
   };
   for (const event of run.events) {
-    if (event.type === "usage") continue;
+    if (event.type === "usage" || event.type === "started") continue;
+    if (event.type === "finished" && event.status === "completed") continue;
     if (event.type === "tool_call" || event.type === "tool_result") {
       tools.push(event);
       continue;
     }
     flushTools();
     if (event.type === "message") {
+      replied = true;
       entries.push(
         <article key={event.sequence} className="agent-reply">
           <h2 className="visually-hidden">{run.providerName}</h2>
           <div className="markdown" dangerouslySetInnerHTML={{ __html: markdown.render(event.text) }} />
         </article>,
       );
-    } else {
+    } else if (event.type !== "finished" || event.status !== "failed" || !run.events.some((entry) => entry.type === "error")) {
       entries.push(<p key={event.sequence} className={`feed-line ${event.type}`}>{event.text}</p>);
     }
   }
   flushTools();
-  return <>{entries}</>;
+  const working = run.status === "running" || run.status === "stopping";
+  if (working) {
+    entries.push(
+      <p key="working" className="feed-line working" role="status">
+        <span className="working-dot" aria-hidden="true" />{`${run.providerName} is ${run.status === "stopping" ? "stopping" : "working"}…`}
+      </p>,
+    );
+  } else if (run.status === "completed" && !replied) {
+    entries.push(<p key="empty" className="feed-line">{`${run.providerName} finished without a reply.`}</p>);
+  }
+  if (!working) entries.push(<p key="meta" className="turn-meta">{turnMeta(run)}</p>);
+  return <section className="turn" aria-label={`Message: ${run.prompt.slice(0, 60)}`}>{entries}</section>;
 }
 
-function Thread({ run }: { run: Run | undefined }) {
+function Conversation({ chat: current }: { chat: Thread | undefined }) {
   const thread = useRef<HTMLDivElement>(null);
   const atBottom = useRef(true);
   const lastThreadId = useRef<string | undefined>(undefined);
   useLayoutEffect(() => {
     const node = thread.current;
     if (!node) return;
-    if (run && (atBottom.current || run.id !== lastThreadId.current)) node.scrollTop = node.scrollHeight;
-    lastThreadId.current = run?.id;
+    if (current && (atBottom.current || current.id !== lastThreadId.current)) node.scrollTop = node.scrollHeight;
+    lastThreadId.current = current?.id;
   });
   const chat = state.mode === "chat";
   return (
@@ -271,7 +298,7 @@ function Thread({ run }: { run: Run | undefined }) {
         atBottom.current = node.scrollHeight - node.scrollTop - node.clientHeight < 55;
       }}
     >
-      <div id="welcome" className="welcome" hidden={Boolean(run)}>
+      <div id="welcome" className="welcome" hidden={Boolean(current)}>
         <img className="welcome-mark" src="./honeycomb-logo.svg" alt="" width="76" height="76" />
         <h2 id="welcome-title">{chat ? "Ask a question" : "Start a review run"}</h2>
         <p id="welcome-description">
@@ -289,7 +316,7 @@ function Thread({ run }: { run: Run | undefined }) {
         </div>
       </div>
       <div
-        id="feed" className="feed" hidden={!run}
+        id="feed" className="feed" hidden={!current}
         onClick={(event) => {
           const link = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>("a[href]") : null;
           if (!link) return;
@@ -297,7 +324,7 @@ function Thread({ run }: { run: Run | undefined }) {
           if (/^https?:$/.test(link.protocol)) openReplyLink(link.href);
         }}
       >
-        {run && <FeedEntries run={run} />}
+        {current?.runs.map((run) => <Turn key={run.id} run={run} />)}
       </div>
     </div>
   );
@@ -407,59 +434,23 @@ function Composer() {
   );
 }
 
-function Facts({ items }: { items: ReadonlyArray<readonly [label: string, value: string]> }) {
-  return (
-    <dl className="run-facts">
-      {items.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}
-    </dl>
-  );
-}
-
-function RunDetails({ run }: { run: Run | undefined }) {
-  if (!run) return <div id="run-details"><p className="empty-details">Run status and reported usage appear here.</p></div>;
-  const totals: Array<readonly [string, string]> = [];
-  for (const [key, label] of usageLabels) {
-    const value = run.usage[key];
-    if (value !== undefined) totals.push([label, (key === "costUsd" ? usd : number).format(value)]);
-  }
-  const active = run.status === "running" || run.status === "stopping";
-  return (
-    <div id="run-details">
-      <div className="detail-top">
-        <h3>{run.providerName}</h3>
-        <span className="run-state"><StatusDot status={run.status} />{statusLabels[run.status]}</span>
-      </div>
-      {run.folder && <Facts items={[["Project", run.folder.name], ["Workflow", "Solo"]]} />}
-      <section className="run-usage">
-        <h3>Usage</h3>
-        {totals.length ? <Facts items={totals} />
-          : <p className="empty-details">{active ? "Waiting for usage data." : "The provider reported no usage."}</p>}
-      </section>
-    </div>
-  );
-}
-
 function Chats() {
-  const run = selectedRun();
+  const current = selectedThread();
   const active = activeRun();
-  const title = run?.prompt.replace(/\s+/g, " ") ?? (state.mode === "chat" ? "New chat" : "New task");
+  const title = current?.title ?? (state.mode === "chat" ? "New chat" : "New task");
   return (
-    <main id="chats" className={state.mode === "chat" ? "workspace chat-only" : "workspace"} hidden={state.view !== "chats"}>
+    <main id="chats" className="workspace chat-only" hidden={state.view !== "chats"}>
       <section className="chat-pane" aria-labelledby="chat-title">
         <div className="chat-header">
-          <h1 id="chat-title" title={run ? title : ""}>{title}</h1>
+          <h1 id="chat-title" title={current ? title : ""}>{title}</h1>
           <button type="button" id="stop-run" className="button button-small" hidden={!active}
             disabled={active?.status === "stopping"} onClick={() => void stopRun()}>
             {active?.status === "stopping" ? "Stopping…" : "Stop run"}
           </button>
         </div>
-        <Thread run={run} />
+        <Conversation chat={current} />
         <Composer />
       </section>
-      <aside className="details" aria-labelledby="details-title">
-        <h2 id="details-title">Run details</h2>
-        <RunDetails run={run} />
-      </aside>
     </main>
   );
 }

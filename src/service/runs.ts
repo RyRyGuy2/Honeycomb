@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { streamClaude } from "../providers/claude.js";
+import { parseClaudeSessionId, streamClaude } from "../providers/claude.js";
 import { parseCodexModel } from "../providers/codex.js";
 import { checkProvider, providerEnvironment, providers } from "../providers/index.js";
 import { parseEffort, streamCodexChat, streamOpenCodeChat, streamProvider } from "../providers/stream.js";
@@ -15,6 +15,32 @@ const MAX_PROMPT_LENGTH = 8_000;
 const MAX_MESSAGE_LENGTH = 16_000;
 const TIMEOUT_MS = 5 * 60_000;
 const USAGE_KEYS = ["inputTokens", "outputTokens", "cachedTokens", "costUsd"] as const;
+const MAX_CONTEXT_LENGTH = 24_000;
+const THREAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** The text a run replied with, in order. */
+export function replyText(run: Run) {
+  return run.events.flatMap((event) => event.type === "message" ? [event.text] : []).join("\n\n");
+}
+
+/**
+ * Builds the prompt for a follow-up when the provider can't resume its own session: the earlier turns,
+ * newest kept when the transcript is long, then the new message.
+ */
+export function promptWithHistory(earlier: Run[], prompt: string) {
+  const turns: string[] = [];
+  let length = 0;
+  for (const run of [...earlier].reverse()) {
+    const reply = replyText(run) || (run.status === "completed" ? "(no reply)" : "(no reply: the turn " + run.status + ")");
+    const turn = "User: " + run.prompt + "\n\nAssistant: " + reply;
+    if (length + turn.length > MAX_CONTEXT_LENGTH) break;
+    turns.unshift(turn);
+    length += turn.length;
+  }
+  if (!turns.length) return prompt;
+  return "This message continues an earlier conversation. Earlier turns, oldest first:\n\n" +
+    turns.join("\n\n---\n\n") + "\n\n---\n\nRespond to the user's new message:\n\n" + prompt;
+}
 
 interface ActiveRun {
   run: Run;
@@ -67,7 +93,9 @@ export function createRunService(
     append(run, { type: "finished", status, text });
   }
 
-  async function execute(run: Run, provider: ProviderAdapter, signal: AbortSignal, effort?: string, chatModel?: string) {
+  async function execute(
+    run: Run, provider: ProviderAdapter, signal: AbortSignal, earlier: Run[], effort?: string, chatModel?: string,
+  ) {
     const env = providerEnvironment(provider);
     const codexChat = run.mode === "chat" && provider.id === "codex";
     if (codexChat) {
@@ -116,23 +144,49 @@ export function createRunService(
       const { connector, executable } = await checkProvider(provider, signal, options.executable);
       if (signal.aborted) return finish(run, "cancelled", "Run stopped.");
       if (!executable) throw new Error(connector.detail ?? provider.name + " was not found on PATH.");
-      if (run.mode === "chat") isolatedDirectory = await mkdtemp(join(tmpdir(), "honeycomb-chat-"));
+      // Claude Code keys saved sessions by folder, so a chat keeps one folder for all its turns.
+      let chatDirectory: string | undefined;
+      if (run.mode === "chat" && provider.id === "claude") {
+        chatDirectory = join(tmpdir(), "honeycomb-chat-" + run.threadId);
+        await mkdir(chatDirectory, { recursive: true });
+      } else if (run.mode === "chat") {
+        isolatedDirectory = await mkdtemp(join(tmpdir(), "honeycomb-chat-"));
+      }
       const transport = {
-        ...executable, cwd: run.folder?.path ?? isolatedDirectory, env, timeoutMs: TIMEOUT_MS, signal,
+        ...executable, cwd: run.folder?.path ?? chatDirectory ?? isolatedDirectory, env, timeoutMs: TIMEOUT_MS, signal,
         onStderr(tail: string) {
           if (providerNotice || signal.aborted) return;
           providerNotice = provider.diagnoseStderr?.(tail);
           if (providerNotice) append(run, { type: "notice", text: providerNotice });
         },
       };
+      // Claude Code continues its own session when the previous turn was a Claude Code turn with a saved session.
+      // Otherwise the earlier turns travel with the prompt.
+      const previous = earlier.at(-1);
+      const resume = provider.id === "claude" && previous?.providerId === "claude"
+        ? parseClaudeSessionId(previous.sessionId) : undefined;
+      const prompt = resume ? run.prompt : promptWithHistory(earlier, run.prompt);
       if (provider.id === "claude") {
-        await streamClaude(transport, run.prompt, { model: options.model, effort, chat: run.mode === "chat" }, receive);
+        const claudeTurn = (text: string, session?: string) => streamClaude(transport, text, {
+          model: options.model, effort, chat: run.mode === "chat", resume: session,
+          onSession(reported) {
+            run.sessionId = reported.id;
+            if (reported.model) run.model = reported.model;
+          },
+        }, receive);
+        try {
+          await claudeTurn(prompt, resume);
+        } catch (error) {
+          // A saved session can disappear (for example, if Claude Code's history was cleared). Carry the chat over instead.
+          if (!resume || signal.aborted || !/no conversation found|session.*not found/i.test(String(error))) throw error;
+          await claudeTurn(promptWithHistory(earlier, run.prompt));
+        }
       } else if (codexChat) {
-        await streamCodexChat(transport, run.prompt, chatModel, receive, effort);
+        await streamCodexChat(transport, prompt, chatModel, receive, effort);
       } else if (run.mode === "chat") {
-        await streamOpenCodeChat(transport, run.prompt, options.model, connector.version, receive, effort);
+        await streamOpenCodeChat(transport, prompt, options.model, connector.version, receive, effort);
       } else {
-        await streamProvider(provider.id, transport, run.prompt, options.model, connector.version, receive, effort);
+        await streamProvider(provider.id, transport, prompt, options.model, connector.version, receive, effort);
       }
       if (signal.aborted) return finish(run, "cancelled", "Run stopped.");
       finish(run, "completed", "Run completed.");
@@ -180,9 +234,24 @@ export function createRunService(
       if (!prompt || prompt.length > MAX_PROMPT_LENGTH || prompt.includes("\0")) {
         throw new Error(`Enter a task of 1 to ${MAX_PROMPT_LENGTH.toLocaleString("en-US")} characters.`);
       }
+      const requestedThread = payload?.threadId;
+      if (requestedThread !== undefined && (typeof requestedThread !== "string" || !THREAD_ID.test(requestedThread))) {
+        throw new Error("Invalid chat.");
+      }
+      // Earlier turns of the chat, oldest first. A chat stays in one mode and, in Code, one project.
+      const earlier = requestedThread
+        ? history.filter((entry) => (entry.threadId ?? entry.id) === requestedThread).reverse()
+        : [];
+      if (requestedThread && !earlier.length) throw new Error("This chat is no longer saved. Start a new chat.");
+      const first = earlier[0];
+      if (first && ((first.mode ?? "code") !== mode || (mode === "code" && first.folder?.path !== folder?.path))) {
+        throw new Error("This chat belongs to another project or mode. Start a new chat.");
+      }
 
+      const id = randomUUID();
       const run: Run = {
-        id: randomUUID(),
+        id,
+        threadId: requestedThread ?? id,
         providerId: provider.id,
         providerName: provider.name,
         mode,
@@ -198,7 +267,7 @@ export function createRunService(
       history.unshift(run);
       active = { run, controller };
       append(run, { type: "started", text: `Starting ${provider.name}.` });
-      active.done = execute(run, provider, controller.signal, effort, chatModel);
+      active.done = execute(run, provider, controller.signal, earlier, effort, chatModel);
       return run.id;
     },
     stop(runId: string) {

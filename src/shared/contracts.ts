@@ -65,11 +65,19 @@ export interface Run {
   events: RunEvent[];
   usage: RunUsage;
   revision: number;
+  /** The chat this run is a turn of. Runs saved before chats existed have none and stand alone. */
+  threadId?: string;
+  /** The provider's own conversation ID, used to continue the chat on the next turn. */
+  sessionId?: string;
+  /** The model the provider reported for this turn. */
+  model?: string;
 }
 
 export interface StartRunRequest {
   providerId: ProviderId;
   prompt: string;
+  /** Continue this chat; omit to start a new one. */
+  threadId?: string;
   effort?: string;
   mode?: WorkspaceMode;
   model?: string;

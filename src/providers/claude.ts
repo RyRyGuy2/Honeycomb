@@ -30,6 +30,10 @@ export interface ClaudeRunOptions {
   model?: string;
   effort?: string;
   chat?: boolean;
+  /** Continue this Claude Code session instead of starting a new one. */
+  resume?: string;
+  /** Called with the session ID and model the CLI reports. */
+  onSession?: (session: { id: string; model?: string }) => void;
 }
 
 interface ClaudeTransport {
@@ -40,6 +44,13 @@ interface ClaudeTransport {
   timeoutMs: number;
   signal?: AbortSignal;
   onStderr?: (tail: string) => void;
+}
+
+const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Validates a Claude Code session ID before it is passed back to the CLI. */
+export function parseClaudeSessionId(value: unknown): string | undefined {
+  return typeof value === "string" && SESSION_ID.test(value) ? value : undefined;
 }
 
 export function parseClaudeModel(value: unknown): string {
@@ -61,14 +72,15 @@ function failureMessage(text: string) {
   return text;
 }
 
-export function claudeArgs({ model, effort, chat = false }: ClaudeRunOptions = {}): string[] {
+export function claudeArgs({ model, effort, chat = false, resume }: ClaudeRunOptions = {}): string[] {
   return [
     "-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
-    // Keep the folder's .claude settings and hooks, MCP servers, slash commands and saved sessions out of the run.
+    // Keep the folder's .claude settings and hooks, MCP servers and slash commands out of the run.
+    // Sessions are saved so the next message in the chat can resume them.
     "--setting-sources", "user",
     "--strict-mcp-config",
     "--disable-slash-commands",
-    "--no-session-persistence",
+    ...(resume ? ["--resume", resume] : []),
     "--permission-mode", "default",
     ...(chat
       ? ["--tools", "", "--append-system-prompt", CHAT_PROMPT]
@@ -97,7 +109,7 @@ export const claude: ProviderAdapter = {
   probeEnvironment: { DISABLE_AUTOUPDATER: "1" },
   requiredHelpFlags: [
     "--setting-sources", "--strict-mcp-config", "--tools", "--include-partial-messages",
-    "--disable-slash-commands", "--no-session-persistence", "--effort",
+    "--disable-slash-commands", "--resume", "--effort",
   ],
   helpIssue: "This Claude Code CLI is too old for safe review runs. Run `claude update`, then refresh.",
   parseVersion(output) {
@@ -188,6 +200,10 @@ export async function streamClaude(
   let completed = false;
 
   const stdout = readJsonLines((line) => {
+    const session = parseClaudeSessionId(line.session_id);
+    if (session && (line.type === "system" || line.type === "result")) {
+      options.onSession?.({ id: session, model: typeof line.model === "string" ? line.model : undefined });
+    }
     if (line.type === "stream_event") {
       const event = asRecord(line.event);
       if (event?.type === "message_start") {

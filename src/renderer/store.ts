@@ -60,10 +60,10 @@ export const state = {
   switchingMode: false,
   codexChatModel: "",
   drafts: { code: "", chat: "" },
-  lastRunByMode: {} as Partial<Record<WorkspaceMode, string | undefined>>,
+  lastThreadByMode: {} as Partial<Record<WorkspaceMode, string | undefined>>,
   projects: [] as ProjectFolder[],
   expandedProjects: new Set<string>(),
-  selectedRunId: undefined as string | undefined,
+  selectedThreadId: undefined as string | undefined,
   selectedConnectorId: "codex" as ProviderId,
   catalogOpen: false,
   catalogQuery: "",
@@ -116,16 +116,43 @@ export function activeRun() {
   return [...state.runs.values()].find((run) => run.status === "running" || run.status === "stopping");
 }
 
-export function projectRuns(path = state.folder?.path) {
-  return path ? history().filter((run) => run.folder?.path === path) : [];
+/** A chat: its turns oldest first, and its newest turn. */
+export interface Thread {
+  id: string;
+  title: string;
+  runs: Run[];
+  latest: Run;
 }
 
-export function generalChats() {
-  return history().filter((run) => run.mode === "chat");
+export const threadIdOf = (run: Run) => run.threadId ?? run.id;
+
+/** Groups runs into chats, newest activity first. */
+function threadsOf(runs: Run[]): Thread[] {
+  const byId = new Map<string, Run[]>();
+  for (const run of runs) {
+    const id = threadIdOf(run);
+    byId.set(id, [...(byId.get(id) ?? []), run]);
+  }
+  return [...byId.entries()].map(([id, turns]) => {
+    const ordered = turns.sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+    const latest = ordered[ordered.length - 1] as Run;
+    return { id, title: (ordered[0] as Run).prompt.replace(/\s+/g, " "), runs: ordered, latest };
+  }).sort((a, b) => b.latest.startedAt.localeCompare(a.latest.startedAt));
 }
 
-export function selectedRun() {
-  return state.selectedRunId ? state.runs.get(state.selectedRunId) : undefined;
+export function projectThreads(path = state.folder?.path) {
+  return path ? threadsOf(history().filter((run) => run.mode !== "chat" && run.folder?.path === path)) : [];
+}
+
+export function generalThreads() {
+  return threadsOf(history().filter((run) => run.mode === "chat"));
+}
+
+/** The open chat, if it belongs to the current mode (and, in Code, the open project). */
+export function selectedThread() {
+  if (!state.selectedThreadId) return undefined;
+  const threads = state.mode === "chat" ? generalThreads() : projectThreads();
+  return threads.find((thread) => thread.id === state.selectedThreadId);
 }
 
 export function connectorFor(id: ProviderId) {
@@ -210,8 +237,8 @@ export function showView(view: View) {
   }
 }
 
-export function selectRun(id: string | undefined) {
-  state.selectedRunId = id;
+export function selectThread(id: string | undefined) {
+  state.selectedThreadId = id;
   emit();
 }
 
@@ -251,14 +278,14 @@ export function loadForView() {
   }
 }
 
-export async function openProject(project: ProjectFolder, runId?: string) {
+export async function openProject(project: ProjectFolder, threadId?: string) {
   if (state.mode !== "code" || state.choosing || state.starting || state.switchingMode) return;
   state.choosing = true;
   state.actionError = "";
   emit();
   try {
     state.folder = await api.selectProject(project.path);
-    state.selectedRunId = runId ?? projectRuns()[0]?.id;
+    state.selectedThreadId = threadId ?? projectThreads()[0]?.id;
   } catch (error) {
     showError(error);
   } finally {
@@ -285,11 +312,11 @@ export async function switchMode(next: WorkspaceMode) {
   try {
     await api.setMode(next);
     state.drafts[state.mode] = state.prompt;
-    state.lastRunByMode[state.mode] = state.selectedRunId;
+    state.lastThreadByMode[state.mode] = state.selectedThreadId;
     state.mode = next;
     state.prompt = state.drafts[next];
-    state.selectedRunId = Object.hasOwn(state.lastRunByMode, next) ? state.lastRunByMode[next]
-      : (next === "chat" ? generalChats() : projectRuns())[0]?.id;
+    state.selectedThreadId = Object.hasOwn(state.lastThreadByMode, next) ? state.lastThreadByMode[next]
+      : (next === "chat" ? generalThreads() : projectThreads())[0]?.id;
     state.actionError = "";
   } catch (error) {
     showError(error);
@@ -436,7 +463,7 @@ export async function stopRun() {
 
 export function newTask() {
   state.actionError = "";
-  state.selectedRunId = undefined;
+  state.selectedThreadId = undefined;
   emit();
   focusLater("prompt");
 }
@@ -451,7 +478,7 @@ export async function chooseFolder() {
     if (selection && selection.path !== state.folder?.path) {
       if (!state.projects.some((project) => project.path === selection.path)) state.projects.push(selection);
       state.folder = selection;
-      state.selectedRunId = projectRuns()[0]?.id;
+      state.selectedThreadId = projectThreads()[0]?.id;
     }
   } catch (error) {
     showError(error);
@@ -470,6 +497,12 @@ export async function submitTask() {
     await signInClaude();
     return;
   }
+  const command = state.provider === "claude" ? /^\/([a-z][\w-]*)$/i.exec(state.prompt.trim()) : null;
+  if (command) {
+    state.actionError = `Claude Code’s /${command[1]} command can’t run inside Honeycomb. Ask in plain words instead, or use /login to sign in.`;
+    emit();
+    return;
+  }
   const connector = connectorFor(state.provider);
   if (!connector || controls().runDisabled) return;
   const draft = state.prompt;
@@ -477,9 +510,12 @@ export async function submitTask() {
   state.actionError = "";
   emit();
   try {
-    state.selectedRunId = await api.startRun({
+    const runId = await api.startRun({
       providerId: connector.id, prompt: draft, effort: thinking().selected, model: chatModelValue(),
+      threadId: selectedThread()?.id,
     });
+    const started = state.runs.get(runId);
+    state.selectedThreadId = started ? threadIdOf(started) : state.selectedThreadId ?? runId;
     if (state.prompt === draft) state.prompt = "";
   } catch (error) {
     showError(error);
@@ -499,7 +535,7 @@ export function start() {
     remember(run);
     if (previous?.status !== run.status) {
       const inMode = run.mode === "chat" ? state.mode === "chat" : state.mode === "code" && run.folder?.path === state.folder?.path;
-      if (run.revision === 1 && inMode) state.selectedRunId = run.id;
+      if (run.revision === 1 && inMode) state.selectedThreadId = threadIdOf(run);
     }
     emit();
   });
@@ -509,7 +545,7 @@ export function start() {
     state.projects = saved.projects;
     state.mode = saved.mode === "chat" ? "chat" : "code";
     for (const run of saved.runs) remember(run);
-    state.selectedRunId ??= (state.mode === "chat" ? generalChats() : projectRuns())[0]?.id;
+    state.selectedThreadId ??= (state.mode === "chat" ? generalThreads() : projectThreads())[0]?.id;
     emit();
   }).catch(showError);
 }

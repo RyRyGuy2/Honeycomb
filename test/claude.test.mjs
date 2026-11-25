@@ -3,7 +3,9 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { claude, claudeArgs, claudeModelCatalog, parseClaudeAuthStatus, parseClaudeModel, streamClaude } from "../dist/providers/claude.js";
+import {
+  claude, claudeArgs, claudeModelCatalog, parseClaudeAuthStatus, parseClaudeModel, parseClaudeSessionId, streamClaude,
+} from "../dist/providers/claude.js";
 import { parseEffort } from "../dist/providers/stream.js";
 
 const valueOf = (args, flag) => args[args.indexOf(flag) + 1];
@@ -17,7 +19,8 @@ test("Code runs are headless, read-only and ignore project settings, MCP servers
   const args = claudeArgs({});
   assert.deepEqual(args.slice(0, 5), ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages"]);
   assert.equal(valueOf(args, "--setting-sources"), "user");
-  for (const flag of ["--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence"]) assert.ok(args.includes(flag), flag);
+  for (const flag of ["--strict-mcp-config", "--disable-slash-commands"]) assert.ok(args.includes(flag), flag);
+  assert.ok(!args.includes("--resume"));
   assert.equal(valueOf(args, "--permission-mode"), "default");
   assert.ok(!args.includes("--dangerously-skip-permissions"));
   assert.equal(valueOf(args, "--tools"), "Read,Grep,Glob");
@@ -27,6 +30,14 @@ test("Code runs are headless, read-only and ignore project settings, MCP servers
   assert.ok(!args.includes("--model") && !args.includes("--effort"));
   assert.ok(claude.requiredHelpFlags.includes("--setting-sources"));
   assert.ok(claude.requiredHelpFlags.includes("--tools"));
+});
+
+test("a follow-up resumes the saved Claude Code session, and only valid session IDs are accepted", () => {
+  const id = "3f1b2c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d";
+  assert.equal(valueOf(claudeArgs({ resume: id }), "--resume"), id);
+  assert.equal(parseClaudeSessionId(id), id);
+  assert.equal(parseClaudeSessionId("--model"), undefined);
+  assert.equal(parseClaudeSessionId("../../etc"), undefined);
 });
 
 test("Chat runs turn every tool off and pass the model and thinking level", () => {
@@ -95,7 +106,7 @@ const fixture = String.raw`
       write({ type: "result", subtype: "success", is_error: true, result: "Failed to authenticate: OAuth token revoked. Please log in again." });
       return;
     }
-    write({ type: "system", subtype: "init", tools: ["Read", "Grep", "Glob"] });
+    write({ type: "system", subtype: "init", session_id: "3f1b2c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d", model: "claude-sonnet-test", tools: ["Read", "Grep", "Glob"] });
     stream({ type: "message_start", message: { id: "msg1" } });
     stream({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Looking " } });
     stream({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "around." } });
@@ -111,6 +122,8 @@ const fixture = String.raw`
 `;
 
 async function runFixture(t, options) {
+  const sessions = [];
+  options = { ...options, onSession: (session) => sessions.push(session) };
   const cwd = await mkdtemp(join(tmpdir(), "honeycomb-claude-test-"));
   t.after(() => rm(cwd, { recursive: true, force: true }));
   const events = [];
@@ -118,12 +131,13 @@ async function runFixture(t, options) {
     { file: process.execPath, args: ["-e", fixture, "--"], cwd, env: { PATH: process.env.PATH ?? "" }, timeoutMs: 20_000 },
     "Map the repo", options, (event) => events.push(event),
   );
-  return { run, events };
+  return { run, events, sessions };
 }
 
 test("a streamed run yields live text, tool activity and the final usage", async (t) => {
-  const { run, events } = await runFixture(t, { model: "sonnet" });
+  const { run, events, sessions } = await runFixture(t, { model: "sonnet" });
   await run;
+  assert.deepEqual(sessions[0], { id: "3f1b2c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d", model: "claude-sonnet-test" });
   assert.deepEqual(events.map((event) => event.type), ["delta", "delta", "tool_call", "tool_result", "message", "usage"]);
   assert.deepEqual(events.slice(0, 2).map(({ id, text }) => [id, text]), [["msg1:0", "Looking "], ["msg1:0", "around."]]);
   assert.equal(events[2].text, "Claude Code Glob\n**/*.ts");

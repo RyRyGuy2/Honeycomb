@@ -446,7 +446,32 @@ main { grid-column: 3; }
 .run-usage h3 { font-size: 13px; }
 .run-usage p { margin-top: 8px; }
 
-.feed { width: min(100%, 740px); display: grid; align-content: start; gap: 12px; margin: 0 auto; }
+.feed { width: min(100%, 740px); display: grid; align-content: start; gap: 26px; margin: 0 auto; }
+/* One chat is a column of turns: the user's message as a bubble, then the reply as plain text. */
+.turn { display: grid; gap: 10px; min-width: 0; }
+.message-user {
+  justify-self: end;
+  max-width: min(82%, 620px);
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--control);
+}
+.message-user p { line-height: 1.56; overflow-wrap: anywhere; white-space: pre-wrap; }
+.turn-meta { padding: 0 2px; color: var(--subtle); font-size: 11px; }
+.feed-line.working { display: inline-flex; gap: 8px; align-items: center; }
+.working-dot, .chat-working {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: working-pulse 1.2s ease-in-out infinite;
+}
+@keyframes working-pulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .working-dot, .chat-working { animation: none; } }
+.chat-item { grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; }
+.chat-item .history-name { font-weight: 460; }
 .feed-entry { min-width: 0; padding: 14px 16px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); }
 .feed-entry.user { background: var(--accent-wash); border-color: var(--accent-border); }
 .feed-entry h2 { margin-bottom: 6px; font-size: 12px; font-weight: 680; color: var(--muted); }
