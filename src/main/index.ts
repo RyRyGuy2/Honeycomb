@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, protocol, session } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, nativeTheme, protocol, session } from "electron";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -168,7 +168,7 @@ function createWindow() {
     height: 820,
     minWidth: 770,
     minHeight: 600,
-    backgroundColor: "#f7f7f2",
+    backgroundColor: "#1e1e1e",
     autoHideMenuBar: true,
     show: false,
     webPreferences: {
@@ -188,6 +188,7 @@ function createWindow() {
 }
 
 app.whenReady().then(async () => {
+  nativeTheme.themeSource = "dark";
   await Promise.all((["codex", "opencode"] as const).map(async (providerId) => {
     try {
       selectedModels[providerId] = modelParsers[providerId](await readFile(modelFile(providerId), "utf8"));
