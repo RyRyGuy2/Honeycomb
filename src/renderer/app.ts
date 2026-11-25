@@ -5,10 +5,16 @@ import type {
 declare global {
   interface Window {
     honeycomb: HoneycombApi;
+    markdownit(options: { html: boolean }): {
+      disable(rule: string): void;
+      render(text: string): string;
+    };
   }
 }
 
 const api = window.honeycomb;
+const markdown = window.markdownit({ html: false });
+markdown.disable("image");
 const viewButtons = document.querySelectorAll<HTMLButtonElement>("[data-view]");
 const connectorButtons = document.querySelectorAll<HTMLButtonElement>("[data-connector]");
 const promptField = get("prompt", HTMLTextAreaElement);
@@ -195,6 +201,21 @@ function feedEntry(author: string, text: string, className = "") {
   return card;
 }
 
+function agentReply(author: string, text: string) {
+  const article = element("article", "agent-reply");
+  const body = element("div", "markdown");
+  body.innerHTML = markdown.render(text);
+  article.append(element("h2", "visually-hidden", author), body);
+  return article;
+}
+
+get("feed").addEventListener("click", (event) => {
+  const link = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>("a[href]") : null;
+  if (!link) return;
+  event.preventDefault();
+  if (/^https?:$/.test(link.protocol)) void api.openReplyLink(link.href).catch(showError);
+});
+
 function renderThread(run: Run | undefined) {
   const thread = get("thread");
   const feed = get("feed");
@@ -212,7 +233,7 @@ function renderThread(run: Run | undefined) {
   for (const event of run.events) {
     if (event.type === "usage") continue;
     if (event.type === "message") {
-      entries.push(feedEntry(run.providerName, event.text));
+      entries.push(agentReply(run.providerName, event.text));
     } else {
       entries.push(element("p", `feed-line ${event.type}`, event.text));
     }

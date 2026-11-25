@@ -22,6 +22,7 @@ const api: HoneycombApi = {
   testOpenCode: () => invoke("test-opencode"),
   chooseFolder: () => invoke("choose-folder"),
   startRun: (request) => invoke("start-run", request),
+  openReplyLink: (url) => invoke("open-reply-link", url),
   stopRun: (runId) => invoke("stop-run", runId),
   onRunChanged(callback) {
     const listener = (_event: IpcRendererEvent, run: Run) => callback(run);

@@ -23,11 +23,6 @@ export interface ModelSelection {
   model: string;
 }
 
-export interface ModelSelection {
-  providerId: ProviderId;
-  model: string;
-}
-
 export interface ProjectFolder {
   name: string;
   path: string;
@@ -87,6 +82,7 @@ export interface IpcCalls {
   "test-opencode": () => void;
   "choose-folder": () => ProjectFolder | undefined;
   "start-run": (request: StartRunRequest) => string;
+  "open-reply-link": (url: string) => void;
   "stop-run": (runId: string) => void;
 }
 
@@ -104,6 +100,7 @@ export interface HoneycombApi {
   testOpenCode: Invoke<"test-opencode">;
   chooseFolder: Invoke<"choose-folder">;
   startRun: Invoke<"start-run">;
+  openReplyLink: Invoke<"open-reply-link">;
   stopRun: Invoke<"stop-run">;
   onRunChanged(callback: (run: Run) => void): () => void;
 }

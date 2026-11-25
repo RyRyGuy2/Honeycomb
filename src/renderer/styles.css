@@ -469,6 +469,24 @@ main { grid-column: 3; }
 .feed-entry.user { background: var(--accent-wash); border-color: var(--accent-border); }
 .feed-entry h2 { margin-bottom: 6px; font-size: 12px; font-weight: 680; color: var(--muted); }
 .feed-entry p { line-height: 1.56; overflow-wrap: anywhere; white-space: pre-wrap; }
+.agent-reply { min-width: 0; padding: 8px 2px; line-height: 1.62; overflow-wrap: anywhere; }
+.markdown > :first-child { margin-top: 0; }
+.markdown > :last-child { margin-bottom: 0; }
+.markdown :is(p, ul, ol, pre, blockquote, table) { margin: 0 0 12px; }
+.markdown :is(h1, h2, h3, h4, h5, h6) { margin: 17px 0 7px; line-height: 1.32; }
+.markdown h1 { font-size: 23px; }
+.markdown h2 { font-size: 18px; }
+.markdown :is(h3, h4, h5, h6) { font-size: 15px; }
+.markdown :is(ul, ol) { padding-inline-start: 24px; }
+.markdown li > :is(ul, ol, p) { margin-bottom: 4px; }
+.markdown a { color: var(--accent-hover); text-underline-offset: 2px; }
+.markdown code { padding: 1px 4px; border-radius: 4px; background: var(--control); font-size: .93em; }
+.markdown pre { overflow: auto; padding: 12px 14px; border: 1px solid var(--border); border-radius: 7px; background: var(--rail); }
+.markdown pre code { padding: 0; background: transparent; }
+.markdown blockquote { padding-inline-start: 12px; border-inline-start: 3px solid var(--strong-border); color: var(--muted); }
+.markdown table { display: block; max-width: 100%; overflow: auto; border-collapse: collapse; }
+.markdown :is(th, td) { padding: 5px 9px; border: 1px solid var(--border); text-align: left; }
+.markdown hr { border: 0; border-top: 1px solid var(--border); }
 .feed-line { padding: 3px 2px; color: var(--muted); line-height: 1.48; overflow-wrap: anywhere; font-size: 12px; }
 .feed-line.error { color: var(--accent-hover); }
 

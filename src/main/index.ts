@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, nativeTheme, protocol, session } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, nativeTheme, protocol, session, shell } from "electron";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +18,7 @@ const RENDERER_ASSETS = new Map<string, readonly [filename: string, contentType:
   ["/", ["index.html", "text/html"]],
   ["/styles.css", ["styles.css", "text/css"]],
   ["/app.js", ["app.js", "text/javascript"]],
+  ["/markdown-it.js", ["markdown-it.js", "text/javascript"]],
 ]);
 const CONTENT_POLICY = [
   "default-src 'none'",
@@ -155,6 +156,12 @@ function registerHandlers() {
     return folder;
   });
   handle("start-run", (request) => runs.start(folder, request));
+  handle("open-reply-link", (value) => {
+    if (typeof value !== "string") throw new Error("Invalid link.");
+    const url = new URL(value);
+    if (!["https:", "http:"].includes(url.protocol)) throw new Error("Only web links can open from a reply.");
+    return shell.openExternal(url.href);
+  });
   handle("stop-run", (runId) => {
     if (typeof runId !== "string") throw new Error("Invalid run.");
     runs.stop(runId);
