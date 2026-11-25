@@ -53,6 +53,8 @@ const usd = new Intl.NumberFormat("en-US", {
 });
 
 let folder: ProjectFolder | undefined;
+let projects: ProjectFolder[] = [];
+const expandedProjects = new Set<string>();
 let selectedRunId: string | undefined;
 let selectedConnectorId: ProviderId = "codex";
 let catalogOpen = false;
@@ -110,15 +112,14 @@ function history() {
 function remember(run: Run) {
   if ((runs.get(run.id)?.revision ?? -1) >= run.revision) return;
   runs.set(run.id, run);
-  for (const old of history().slice(20)) runs.delete(old.id);
 }
 
 function activeRun() {
   return [...runs.values()].find((run) => run.status === "running" || run.status === "stopping");
 }
 
-function projectRuns() {
-  return history().filter((run) => run.folder.path === folder?.path);
+function projectRuns(path = folder?.path) {
+  return history().filter((run) => run.folder.path === path);
 }
 
 function statusDot(status: ConnectorStatus | RunStatus) {
@@ -173,27 +174,67 @@ function renderComposerProvider() {
   renderControls();
 }
 
-function renderSidebar() {
-  get("folder-name").textContent = folder?.name ?? "Choose a folder";
-  const path = get("folder-path");
-  path.hidden = !folder;
-  path.textContent = folder?.path ?? "";
-  path.title = folder?.path ?? "";
+async function openProject(project: ProjectFolder, runId?: string) {
+  if (choosing || starting) return;
+  choosing = true;
+  actionError = "";
+  renderControls();
+  try {
+    folder = await api.selectProject(project.path);
+    selectedRunId = runId ?? projectRuns()[0]?.id;
+  } catch (error) {
+    showError(error);
+  } finally {
+    choosing = false;
+    renderChats();
+  }
+}
 
+function historyButton(run: Run, select: () => void) {
+  const button = element("button", "history-item");
+  button.type = "button";
+  button.title = run.prompt;
+  if (run.id === selectedRunId) button.setAttribute("aria-current", "true");
+  button.append(
+    element("span", "history-name", run.prompt.replace(/\s+/g, " ")),
+    element("span", "history-meta", `${run.providerName} · ${statusLabels[run.status]}`),
+  );
+  button.addEventListener("click", select);
+  return button;
+}
+
+function renderSidebar() {
   const list = get("run-list");
-  const items = projectRuns().map((run) => {
-    const button = element("button", "history-item");
-    button.type = "button";
-    button.title = run.prompt;
-    if (run.id === selectedRunId) button.setAttribute("aria-current", "true");
-    button.append(
-      element("span", "history-name", run.prompt.replace(/\s+/g, " ")),
-      element("span", "history-meta", `${run.providerName} Â· ${statusLabels[run.status]}`),
-    );
-    button.addEventListener("click", () => selectRun(run.id));
-    return button;
+  const groups = projects.map((project) => {
+    const group = element("section", "project-group");
+    const title = element("button", "folder-picker");
+    title.type = "button";
+    title.title = project.path;
+    title.append(element("span", "folder-icon"), element("span", "history-name", project.name));
+    if (project.path === folder?.path) title.setAttribute("aria-current", "true");
+    title.addEventListener("click", () => void openProject(project));
+    const chats = projectRuns(project.path);
+    const expanded = expandedProjects.has(project.path);
+    const chatList = element("div", "project-chats");
+    for (const run of expanded ? chats : chats.slice(0, 3)) {
+      chatList.append(historyButton(run, () => void openProject(project, run.id)));
+    }
+    if (chats.length > 3) {
+      const toggle = element("button", "history-item history-more", expanded ? "Show less" : "...");
+      toggle.type = "button";
+      toggle.setAttribute("aria-expanded", String(expanded));
+      toggle.setAttribute("aria-label", expanded ? `Show fewer chats in ${project.name}` : `Show more chats in ${project.name}`);
+      toggle.addEventListener("click", () => {
+        if (expanded) expandedProjects.delete(project.path);
+        else expandedProjects.add(project.path);
+        renderSidebar();
+      });
+      chatList.append(toggle);
+    }
+    group.append(title, chatList);
+    return group;
   });
-  list.replaceChildren(...(items.length ? items : [element("p", "", "No runs yet.")]));
+  list.replaceChildren(...(groups.length ? groups : [element("p", "", "No saved projects yet.")]));
 }
 
 function feedEntry(author: string, text: string, className = "") {
@@ -613,7 +654,8 @@ get("choose-folder").addEventListener("click", async () => {
   renderControls();
   try {
     const selection = await api.chooseFolder();
-    if (selection?.path !== folder?.path) {
+    if (selection && selection.path !== folder?.path) {
+      if (!projects.some((project) => project.path === selection.path)) projects.push(selection);
       folder = selection;
       selectedRunId = projectRuns()[0]?.id;
     }
@@ -671,6 +713,7 @@ renderChats();
 void refreshConnectors();
 api.getState().then((state) => {
   folder = state.folder;
+  projects = state.projects;
   for (const run of state.runs) remember(run);
   selectedRunId ??= projectRuns()[0]?.id;
   renderChats();

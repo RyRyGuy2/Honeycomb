@@ -601,3 +601,11 @@ main { grid-column: 3; }
   .welcome { padding-bottom: 10px; }
   .thread { padding-block: 12px; }
 }
+
+
+.project-group + .project-group { margin-top: .65rem; }
+.project-group .folder-picker { border-color: transparent; background: transparent; }
+.project-group .folder-picker[aria-current="true"] { color: var(--accent); }
+.project-chats { display: grid; gap: .2rem; margin-left: 1rem; }
+.project-chats .history-item { padding-block: .35rem; }
+.history-more { justify-self: start; }

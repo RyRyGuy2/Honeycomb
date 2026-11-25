@@ -21,6 +21,7 @@ const api: HoneycombApi = {
   setOpenCodeModel: (model) => invoke("set-model", { providerId: "opencode", model }),
   testOpenCode: () => invoke("test-opencode"),
   chooseFolder: () => invoke("choose-folder"),
+  selectProject: (path) => invoke("select-project", path),
   startRun: (request) => invoke("start-run", request),
   openReplyLink: (url) => invoke("open-reply-link", url),
   stopRun: (runId) => invoke("stop-run", runId),

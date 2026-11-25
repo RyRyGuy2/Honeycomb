@@ -40,19 +40,13 @@
       <aside id="chats-sidebar" class="sidebar-panel" aria-labelledby="chats-sidebar-title">
         <h2 id="chats-sidebar-title" class="sidebar-title">Chats</h2>
         <button type="button" id="new-task" class="button sidebar-action">
-          <span aria-hidden="true">+</span> New task
+          <span aria-hidden="true">+</span> New chat
         </button>
-        <div class="sidebar-section">
-          <h3>Project</h3>
-          <button type="button" id="choose-folder" class="folder-picker">
-            <span class="folder-icon" aria-hidden="true"></span>
-            <span id="folder-name">Choose a folder</span>
-            <span class="picker-arrow" aria-hidden="true">↗</span>
-          </button>
-          <p id="folder-path" class="folder-path" hidden></p>
-        </div>
+        <button type="button" id="choose-folder" class="button sidebar-action">
+          <span aria-hidden="true">+</span> Add project
+        </button>
         <div class="sidebar-section run-history">
-          <h3>Recent runs</h3>
+          <h3>Projects</h3>
           <div id="run-list" class="run-list"></div>
         </div>
       </aside>

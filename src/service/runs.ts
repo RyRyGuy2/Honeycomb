@@ -5,7 +5,6 @@ import type { FinishedRunStatus, ProjectFolder, ProviderId, Run, RunEventData, R
 import { asRecord } from "../shared/records.js";
 import { readJsonLines, runProcess } from "./process.js";
 
-const MAX_RUNS = 20;
 const MAX_PROMPT_LENGTH = 8_000;
 const MAX_MESSAGE_LENGTH = 16_000;
 const TIMEOUT_MS = 5 * 60_000;
@@ -141,6 +140,19 @@ export function createRunService(
   }
 
   return {
+    restore(saved: Run[]) {
+      for (const run of saved) {
+        if (run.status === "running" || run.status === "stopping") {
+          run.status = "failed";
+          run.finishedAt = new Date().toISOString();
+          run.events.push({
+            type: "finished", status: "failed", text: "The app closed before the response finished.",
+            at: run.finishedAt, runId: run.id, sequence: ++run.revision,
+          });
+        }
+        history.push(run);
+      }
+    },
     history() {
       return history;
     },
@@ -171,7 +183,6 @@ export function createRunService(
       };
       const controller = new AbortController();
       history.unshift(run);
-      if (history.length > MAX_RUNS) history.pop();
       active = { run, controller };
       append(run, { type: "started", text: `Starting ${provider.name}.` });
       active.done = execute(run, provider, controller.signal);

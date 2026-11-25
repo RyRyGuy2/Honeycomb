@@ -70,6 +70,7 @@ export interface StartRunRequest {
 
 export interface AppState {
   folder: ProjectFolder | undefined;
+  projects: ProjectFolder[];
   runs: Run[];
 }
 
@@ -81,6 +82,7 @@ export interface IpcCalls {
   "set-model": (selection: ModelSelection) => void;
   "test-opencode": () => void;
   "choose-folder": () => ProjectFolder | undefined;
+  "select-project": (path: string) => ProjectFolder;
   "start-run": (request: StartRunRequest) => string;
   "open-reply-link": (url: string) => void;
   "stop-run": (runId: string) => void;
@@ -99,6 +101,7 @@ export interface HoneycombApi {
   setOpenCodeModel(model: string): Promise<void>;
   testOpenCode: Invoke<"test-opencode">;
   chooseFolder: Invoke<"choose-folder">;
+  selectProject: Invoke<"select-project">;
   startRun: Invoke<"start-run">;
   openReplyLink: Invoke<"open-reply-link">;
   stopRun: Invoke<"stop-run">;

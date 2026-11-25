@@ -10,6 +10,7 @@ import { listOpenCodeModels, testOpenCode } from "../providers/opencode-models.j
 import { opencode, parseOpenCodeModel } from "../providers/opencode.js";
 import { runProcess } from "../service/process.js";
 import { createRunService } from "../service/runs.js";
+import { createWorkspaceStore } from "../service/workspace.js";
 import type { IpcCalls, ProjectFolder, ProviderId } from "../shared/contracts.js";
 import { asRecord } from "../shared/records.js";
 
@@ -31,6 +32,7 @@ const CONTENT_POLICY = [
 
 let mainWindow: BrowserWindow | undefined;
 let folder: ProjectFolder | undefined;
+let projects: ProjectFolder[] = [];
 let quitting = false;
 const selectedModels: Record<ProviderId, string> = { codex: "", opencode: "" };
 const modelParsers = { codex: parseCodexModel, opencode: parseOpenCodeModel };
@@ -39,12 +41,18 @@ const connectorAbort = new AbortController();
 const connectorJobs = new Set<Promise<unknown>>();
 const getOpenCodePath = () => managedOpenCodePath(app.getPath("userData"));
 const modelFile = (providerId: ProviderId) => join(app.getPath("userData"), `${providerId}-model`);
+const workspace = createWorkspaceStore(() => join(app.getPath("userData"), "workspace.json"));
 const runs = createRunService((run) => {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("honeycomb:run-changed", run);
+  if (run.revision === 1 || run.finishedAt) void workspace.save(workspaceState());
 }, (providerId) => ({
   executable: providerId === "opencode" ? getOpenCodePath() : undefined,
   model: selectedModels[providerId],
 }));
+
+function workspaceState() {
+  return { folder, projects, runs: runs.history() };
+}
 
 function requireProviderId(value: unknown): ProviderId {
   if (value === "codex" || value === "opencode") return value;
@@ -116,7 +124,7 @@ function handle<Channel extends keyof IpcCalls>(
 }
 
 function registerHandlers() {
-  handle("state", () => ({ folder, runs: runs.history() }));
+  handle("state", workspaceState);
   handle("inspect-providers", async () => {
     const connectors = await inspectProviders(getOpenCodePath());
     return connectors.map((connector) => connector.id === "opencode"
@@ -151,9 +159,21 @@ function registerHandlers() {
     });
     const [path] = selection.filePaths;
     if (!selection.canceled && path) {
-      folder = { name: basename(path) || path, path };
+      folder = projects.find((project) => project.path === path);
+      if (!folder) {
+        folder = { name: basename(path) || path, path };
+        projects.push(folder);
+      }
+      await workspace.save(workspaceState());
     }
-    return folder;
+    return selection.canceled ? undefined : folder;
+  });
+  handle("select-project", async (path) => {
+    const project = projects.find((entry) => entry.path === path);
+    if (!project) throw new Error("This project is no longer saved.");
+    folder = project;
+    await workspace.save(workspaceState());
+    return project;
   });
   handle("start-run", (request) => runs.start(folder, request));
   handle("open-reply-link", (value) => {
@@ -196,6 +216,12 @@ function createWindow() {
 
 app.whenReady().then(async () => {
   nativeTheme.themeSource = "dark";
+  const saved = await workspace.load();
+  if (saved) {
+    projects = saved.projects;
+    folder = projects.find((project) => project.path === saved.folder?.path);
+    runs.restore(saved.runs);
+  }
   await Promise.all((["codex", "opencode"] as const).map(async (providerId) => {
     try {
       selectedModels[providerId] = modelParsers[providerId](await readFile(modelFile(providerId), "utf8"));
@@ -222,10 +248,8 @@ app.on("before-quit", (event) => {
     if (runs.hasActiveRun() || connectorJobs.size) event.preventDefault();
     return;
   }
-  if (!runs.hasActiveRun() && !connectorJobs.size) return;
-
   event.preventDefault();
   quitting = true;
   connectorAbort.abort();
-  void Promise.allSettled([runs.shutdown(), ...connectorJobs]).then(() => app.quit());
+  void Promise.allSettled([runs.shutdown(), ...connectorJobs]).then(() => workspace.flush()).then(() => app.quit());
 });
