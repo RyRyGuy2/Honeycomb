@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { claude, claudeArgs, claudeModelCatalog, parseClaudeModel, streamClaude } from "../dist/providers/claude.js";
+import { claude, claudeArgs, claudeModelCatalog, parseClaudeAuthStatus, parseClaudeModel, streamClaude } from "../dist/providers/claude.js";
 import { parseEffort } from "../dist/providers/stream.js";
 
 const valueOf = (args, flag) => args[args.indexOf(flag) + 1];
@@ -49,6 +49,14 @@ test("models, versions and model IDs are recognized", () => {
   assert.equal(claude.parseVersion("1.0.108 (Claude Code)\n"), "1.0.108");
   assert.equal(claude.parseVersion("2.1.332 (Claude Code)"), "2.1.332");
   assert.equal(claude.parseVersion("v22.19.0"), undefined);
+});
+
+test("sign-in status is read from claude auth status", () => {
+  // Output shape from Claude Code 2.1.332.
+  assert.equal(parseClaudeAuthStatus('{\n  "loggedIn": false,\n  "authMethod": "none"\n}'), false);
+  assert.equal(parseClaudeAuthStatus('{"loggedIn": true, "authMethod": "claude.ai"}'), true);
+  assert.equal(parseClaudeAuthStatus("not json"), undefined);
+  assert.equal(parseClaudeAuthStatus("{}"), undefined);
 });
 
 test("result lines report usage, and error results fail with actionable messages", () => {

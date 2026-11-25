@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import type { ModelCatalog } from "../shared/contracts.js";
 import { asRecord } from "../shared/records.js";
 import { readJsonLines, runProcess } from "../service/process.js";
@@ -132,6 +133,43 @@ export const claude: ProviderAdapter = {
     return { completed: true, event: usageEvent };
   },
 };
+
+/** Reads `claude auth status` output; undefined when the CLI did not report a status. */
+export function parseClaudeAuthStatus(output: string): boolean | undefined {
+  try {
+    const loggedIn = asRecord(JSON.parse(output))?.loggedIn;
+    return typeof loggedIn === "boolean" ? loggedIn : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export async function claudeSignedIn(executable: { file: string; args: readonly string[] }, env: NodeJS.ProcessEnv, signal?: AbortSignal) {
+  const result = await runProcess({
+    file: executable.file, args: [...executable.args, "auth", "status"], env: { ...env, ...CLAUDE_ENV },
+    timeoutMs: 10_000, outputLimit: 64 * 1024, signal,
+  });
+  return parseClaudeAuthStatus(result.output);
+}
+
+/**
+ * Opens `claude auth login` in its own console window so the user can finish the browser sign-in,
+ * and resolves when that window closes.
+ */
+export function signInClaude(executable: { file: string; args: readonly string[] }, env: NodeJS.ProcessEnv, timeoutMs = 10 * 60_000) {
+  return new Promise<void>((resolve, reject) => {
+    // On Windows a detached console program gets a console window of its own.
+    const child = spawn(executable.file, [...executable.args, "auth", "login"], {
+      env: { ...env, ...CLAUDE_ENV }, detached: true, windowsHide: false, stdio: "ignore", shell: false,
+    });
+    const deadline = setTimeout(() => {
+      child.kill();
+      reject(new Error("Claude Code sign-in timed out. Try again."));
+    }, timeoutMs);
+    child.once("error", (error) => { clearTimeout(deadline); reject(error); });
+    child.once("exit", () => { clearTimeout(deadline); resolve(); });
+  });
+}
 
 function toolTarget(input: Record<string, unknown> | undefined) {
   const target = [input?.file_path, input?.path, input?.pattern]

@@ -176,6 +176,8 @@ export function controls() {
     !state.prompt.trim() || provider?.status !== "detected";
 
   let message = state.actionError;
+  if (!message && state.connectorBusy && state.connectorAction.provider === providerId) message = state.connectorAction.text;
+  if (!message && provider?.signedIn === false) message = `${provider.name} isn't signed in. Type /login and press Enter to sign in.`;
   if (!message && state.mode === "code" && !state.folder) message = "Choose a project folder to run a task.";
   if (!message && active) message = `${active.providerName} is ${statusLabels[active.status].toLowerCase()}.`;
   if (!message && provider?.status === "checking") message = `Checking for ${provider.name}…`;
@@ -389,6 +391,14 @@ export async function downloadOpenCode() {
   }, "Downloading and checking OpenCode…", "OpenCode downloaded. You can now test a model.");
 }
 
+export function signInClaude() {
+  return connectorAction("claude", async () => {
+    await api.signInClaude();
+    await refreshConnectors();
+    if (connectorFor("claude")?.signedIn === false) throw new Error("Claude Code still isn't signed in. Try Sign in again.");
+  }, "Finish signing in to Claude Code in the window that opened…", "Claude Code is signed in.", showError);
+}
+
 export function testOpenCode() {
   void connectorAction("opencode", () => api.testOpenCode(), "Testing the selected model…", "OpenCode returned a model response.");
 }
@@ -452,6 +462,14 @@ export async function chooseFolder() {
 }
 
 export async function submitTask() {
+  // Runs are non-interactive, so /login can't reach Claude Code. Open its sign-in window instead.
+  if (state.provider === "claude" && /^\/login$/i.test(state.prompt.trim())) {
+    state.prompt = "";
+    state.actionError = "";
+    emit();
+    await signInClaude();
+    return;
+  }
   const connector = connectorFor(state.provider);
   if (!connector || controls().runDisabled) return;
   const draft = state.prompt;

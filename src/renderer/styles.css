@@ -543,7 +543,7 @@ main { grid-column: 3; }
 .model-field .connector-note { margin-top: 0; }
 .connector-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .connector-actions select { flex: 1 1 200px; }
-#opencode-actions > .connector-note { margin-top: 6px; }
+#opencode-actions > .connector-note, #claude-actions > .connector-note { margin-top: 6px; }
 #connector-action-status:empty { display: none; }
 .connector-facts { display: grid; gap: 10px; font-size: 13px; }
 .connector-facts > div { display: flex; justify-content: space-between; gap: 12px; }

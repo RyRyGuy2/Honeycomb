@@ -6,7 +6,7 @@ import {
   downloadOpenCode, effortLabel, focusLater, generalChats, getVersion, isCodexChat, loadForView, markdown, newTask, number,
   openCatalog, openProject, openReplyLink, projectRuns, providerNames, refreshConnectors, refreshModels, saveModel,
   selectConnector, selectRun, selectedRun, setCatalogQuery, setPrompt, setProvider, setThinking, showView, state, statusLabels,
-  stopRun, submitTask, subscribe, switchMode, testOpenCode, thinking, toggleProject, toggleToolGroup, usageLabels, usd,
+  signInClaude, stopRun, submitTask, subscribe, switchMode, testOpenCode, thinking, toggleProject, toggleToolGroup, usageLabels, usd,
   useConnector,
 } from "./store.js";
 import type { View } from "./store.js";
@@ -360,6 +360,12 @@ function Composer() {
         <textarea
           id="prompt" rows={3} maxLength={8000} placeholder={chat ? "Ask a question…" : "Ask about your project…"}
           value={state.prompt} onChange={(event) => setPrompt(event.target.value)}
+          onKeyDown={(event) => {
+            // Enter sends; Shift+Enter (and Enter while an IME is composing) inserts a new line.
+            if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
+            event.preventDefault();
+            void submitTask();
+          }}
         />
         <div className="composer-actions">
           <div className="composer-options">
@@ -594,6 +600,15 @@ function ConnectorSettings() {
             Test model
           </button>
           <p className="connector-note">The test sends a short prompt using your selected model.</p>
+        </div>
+        <div id="claude-actions" hidden={id !== "claude" || connector.status !== "detected"}>
+          <button type="button" id="sign-in-claude" className="button" disabled={state.connectorBusy}
+            onClick={() => void signInClaude()}>
+            {connector.signedIn ? "Sign in again" : "Sign in"}
+          </button>
+          <p className="connector-note">
+            {connector.signedIn ? "Claude Code is signed in." : "Opens Claude Code’s sign-in in a new window. Finish it in your browser."}
+          </p>
         </div>
       </section>
       <p id="connector-action-status" className="connector-note" role="status"

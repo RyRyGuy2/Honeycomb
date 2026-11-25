@@ -10,6 +10,8 @@ export interface Connector {
   detail?: string;
   managed?: boolean;
   downloadAvailable?: boolean;
+  /** Set for connectors that report a sign-in state. */
+  signedIn?: boolean;
 }
 
 export interface ModelCatalog {
@@ -88,6 +90,7 @@ export interface IpcCalls {
   "list-opencode-efforts": (model: string) => string[];
   "set-model": (selection: ModelSelection) => void;
   "test-opencode": () => void;
+  "sign-in-claude": () => void;
   "choose-folder": () => ProjectFolder | undefined;
   "set-mode": (mode: WorkspaceMode) => void;
   "select-project": (path: string) => ProjectFolder;
@@ -109,6 +112,7 @@ export interface HoneycombApi {
   listOpenCodeModels(): Promise<ModelCatalog>;
   setOpenCodeModel(model: string): Promise<void>;
   testOpenCode: Invoke<"test-opencode">;
+  signInClaude: Invoke<"sign-in-claude">;
   chooseFolder: Invoke<"choose-folder">;
   setMode: Invoke<"set-mode">;
   selectProject: Invoke<"select-project">;

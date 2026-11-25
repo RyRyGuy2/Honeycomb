@@ -2,7 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, nativeTheme, protocol, session, sh
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { claude, claudeModelCatalog, parseClaudeModel } from "../providers/claude.js";
+import { claude, claudeModelCatalog, claudeSignedIn, parseClaudeModel, signInClaude } from "../providers/claude.js";
 import { listCodexModels } from "../providers/codex-models.js";
 import { parseCodexModel } from "../providers/codex.js";
 import { checkProvider, inspectProviders, providerEnvironment } from "../providers/index.js";
@@ -43,6 +43,7 @@ const PROVIDER_IDS = ["codex", "opencode", "claude"] as const satisfies readonly
 const selectedModels: Record<ProviderId, string> = { codex: "", opencode: "", claude: "" };
 const modelParsers = { codex: parseCodexModel, opencode: parseOpenCodeModel, claude: parseClaudeModel };
 let downloading: Promise<void> | undefined;
+let claudeSigningIn: Promise<void> | undefined;
 const connectorAbort = new AbortController();
 const connectorJobs = new Set<Promise<unknown>>();
 const getOpenCodePath = () => managedOpenCodePath(app.getPath("userData"));
@@ -140,9 +141,26 @@ function registerHandlers() {
   handle("state", workspaceState);
   handle("inspect-providers", async () => {
     const connectors = await inspectProviders(getOpenCodePath());
-    return connectors.map((connector) => connector.id === "opencode"
-      ? { ...connector, downloadAvailable: Boolean(openCodeRelease()) }
-      : connector);
+    return Promise.all(connectors.map(async (connector) => {
+      if (connector.id === "opencode") return { ...connector, downloadAvailable: Boolean(openCodeRelease()) };
+      if (connector.id !== "claude" || connector.status !== "detected") return connector;
+      const { executable } = await checkProvider(claude);
+      const signedIn = executable ? await claudeSignedIn(executable, providerEnvironment(claude)).catch(() => undefined) : undefined;
+      return signedIn === false
+        ? { ...connector, signedIn, detail: "Claude Code isn't signed in. Use Sign in below, or type /login in Chats." }
+        : { ...connector, signedIn };
+    }));
+  });
+  handle("sign-in-claude", async () => {
+    if (claudeSigningIn) throw new Error("Finish the Claude Code sign-in window that is already open.");
+    const { connector, executable } = await checkProvider(claude);
+    if (!executable) throw new Error(connector.detail || "Install Claude Code first.");
+    claudeSigningIn = signInClaude(executable, providerEnvironment(claude));
+    try {
+      await claudeSigningIn;
+    } finally {
+      claudeSigningIn = undefined;
+    }
   });
   handle("install-opencode", installOpenCode);
   handle("list-models", (value) => {
