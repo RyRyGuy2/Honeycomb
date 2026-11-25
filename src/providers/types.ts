@@ -1,4 +1,4 @@
-import type { ProviderId, RunUsage } from "../shared/contracts.js";
+import type { CliProviderId, RunUsage } from "../shared/contracts.js";
 
 interface ProviderCommand {
   args: readonly string[];
@@ -20,7 +20,7 @@ interface ProviderUpdate {
 }
 
 export interface ProviderAdapter {
-  id: ProviderId;
+  id: CliProviderId;
   name: string;
   npmLaunchers: ReadonlyArray<readonly string[]>;
   override: string;

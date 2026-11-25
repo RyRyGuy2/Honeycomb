@@ -1,20 +1,23 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme, protocol, session, shell } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme, protocol, safeStorage, session, shell } from "electron";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { claude, claudeModelCatalog, parseClaudeModel } from "../providers/claude.js";
 import { listCodexModels } from "../providers/codex-models.js";
 import { parseCodexModel } from "../providers/codex.js";
+import { listHttpChatModels, streamHttpChat } from "../providers/http-chat.js";
 import { checkProvider, inspectProviders, providerEnvironment } from "../providers/index.js";
 import { installOpenCodeRelease, managedOpenCodePath, openCodeRelease } from "../providers/opencode-install.js";
 import { listOpenCodeEfforts, listOpenCodeModels, testOpenCode } from "../providers/opencode-models.js";
 import { opencode, parseOpenCodeModel } from "../providers/opencode.js";
+import { COPILOT_ID, COPILOT_NAME, createWindowsCopilot } from "../providers/windows-copilot.js";
+import { createChatProfileStore, parseChatModel } from "../service/chat-profiles.js";
 import { runProcess } from "../service/process.js";
 import { FREEBUFF_EXPORT_PATTERN, findFreebuffTerminal, findFreebuffTranscript, openFreebuffTerminal, readFreebuffTranscript, readSavedFreebuffExchange } from "../service/freebuff.js";
 import { createRunService } from "../service/runs.js";
 import { createWorkspaceStore } from "../service/workspace.js";
 import { createWorktreeManager } from "../service/worktree.js";
-import type { FreebuffContext, IpcCalls, ProjectFolder, ProviderId, WorkspaceMode } from "../shared/contracts.js";
+import type { CliProviderId, FreebuffContext, IpcCalls, ProjectFolder, WorkspaceMode } from "../shared/contracts.js";
 import { supportsWorktreeEditing } from "../shared/editing.js";
 import { asRecord } from "../shared/records.js";
 
@@ -25,6 +28,7 @@ const RENDERER_ASSETS = new Map<string, readonly [filename: string, contentType:
   ["/styles.css", ["styles.css", "text/css"]],
   ["/app.js", ["app.js", "text/javascript"]],
   ["/shared/conversations.js", ["../shared/conversations.js", "text/javascript"]],
+  ["/shared/chat-presets.js", ["../shared/chat-presets.js", "text/javascript"]],
   ["/shared/editing.js", ["../shared/editing.js", "text/javascript"]],
   ["/markdown-it.js", ["markdown-it.js", "text/javascript"]],
   ["/honeycomb-logo.svg", ["honeycomb-logo.svg", "image/svg+xml"]],
@@ -44,15 +48,31 @@ let folder: ProjectFolder | undefined;
 let projects: ProjectFolder[] = [];
 let mode: WorkspaceMode = "code";
 let quitting = false;
-const PROVIDER_IDS = ["codex", "opencode", "claude"] as const satisfies readonly ProviderId[];
-const selectedModels: Record<ProviderId, string> = { codex: "", opencode: "", claude: "" };
+const PROVIDER_IDS = ["codex", "opencode", "claude"] as const satisfies readonly CliProviderId[];
+const selectedModels: Record<CliProviderId, string> = { codex: "", opencode: "", claude: "" };
 const modelParsers = { codex: parseCodexModel, opencode: parseOpenCodeModel, claude: parseClaudeModel };
 let downloading: Promise<void> | undefined;
 const connectorAbort = new AbortController();
 const connectorJobs = new Set<Promise<unknown>>();
 const getOpenCodePath = () => managedOpenCodePath(app.getPath("userData"));
-const modelFile = (providerId: ProviderId) => join(app.getPath("userData"), `${providerId}-model`);
+const modelFile = (providerId: CliProviderId) => join(app.getPath("userData"), `${providerId}-model`);
 const workspace = createWorkspaceStore(() => join(app.getPath("userData"), "workspace.json"));
+const copilot = createWindowsCopilot((text) => clipboard.writeText(text));
+const chatProfiles = createChatProfileStore(() => join(app.getPath("userData"), "chat-connections.json"), {
+  encrypt(key) {
+    if (!safeStorage.isEncryptionAvailable() || (process.platform === "linux" && safeStorage.getSelectedStorageBackend() === "basic_text")) {
+      throw new Error("Enable your system credential store before saving an API key.");
+    }
+    return safeStorage.encryptString(key).toString("base64");
+  },
+  decrypt(key) {
+    try {
+      return safeStorage.decryptString(Buffer.from(key, "base64"));
+    } catch {
+      throw new Error("Could not unlock the saved API key. Enter it again in Connectors.");
+    }
+  },
+});
 const worktrees = createWorktreeManager(
   () => join(app.getPath("userData"), "worktrees"),
   () => { void workspace.save(workspaceState()); },
@@ -63,7 +83,21 @@ const runs = createRunService((run) => {
 }, (providerId) => ({
   executable: providerId === "opencode" ? getOpenCodePath() : undefined,
   model: selectedModels[providerId],
-}), worktrees);
+}), worktrees, (id, selected) => {
+  if (id === COPILOT_ID && process.platform === "win32") {
+    return { id, name: COPILOT_NAME, stream: copilot.stream };
+  }
+  const profile = chatProfiles.find(id);
+  if (!profile) return;
+  const model = parseChatModel(selected ?? "") || profile.model || profile.manualModel || "";
+  if (!model) throw new Error("Choose a model before sending.");
+  const connection = chatProfiles.connection(id);
+  return {
+    id: profile.id, name: profile.name,
+    stream: (_run, messages, signal, receive) =>
+      streamHttpChat(connection, model, messages, AbortSignal.any([signal, AbortSignal.timeout(300_000)]), receive),
+  };
+});
 
 function workspaceState() {
   return { folder, projects, runs: runs.history(), mode, worktrees: worktrees.records() };
@@ -84,7 +118,7 @@ async function removeProject(path: string) {
   throw new Error("Could not save the project list. The project was kept.");
 }
 
-function requireProviderId(value: unknown): ProviderId {
+function requireProviderId(value: unknown): CliProviderId {
   const id = PROVIDER_IDS.find((providerId) => providerId === value);
   if (id) return id;
   throw new Error("Choose Codex, OpenCode or Claude Code.");
@@ -219,13 +253,32 @@ function registerHandlers() {
     clipboard.writeText(`/export freebuff-result-${Date.now()}.md`);
   });
   handle("inspect-providers", async () => {
-    const connectors = await inspectProviders(getOpenCodePath());
-    return connectors.map((connector) => connector.id === "opencode"
+    const [connectors, windowsCopilot] = await Promise.all([inspectProviders(getOpenCodePath()), copilot.inspect(connectorAbort.signal)]);
+    return [...connectors.map((connector) => connector.id === "opencode"
       ? { ...connector, downloadAvailable: Boolean(openCodeRelease()) }
-      : connector);
+      : connector), windowsCopilot, ...chatProfiles.list().map(({ id, name }) => ({ id, name, status: "detected" as const, chatOnly: true }))];
+  });
+  handle("chat-profiles", chatProfiles.list);
+  handle("save-chat-profile", (request) => trackConnectorJob(chatProfiles.save(request)));
+  handle("remove-chat-profile", (id) => trackConnectorJob(chatProfiles.remove(id)));
+  handle("test-chat-profile", (request) => trackConnectorJob((async () => {
+    const selection = asRecord(request);
+    const connection = chatProfiles.connection(selection?.id);
+    const signal = AbortSignal.any([connectorAbort.signal, AbortSignal.timeout(60_000)]);
+    const model = parseChatModel(selection?.model);
+    await streamHttpChat(connection, model, [{ role: "user", content: "Reply with the single word OK." }], signal, () => {});
+  })()));
+  handle("copilot-handoff", (id) => copilot.copyDraft(id));
+  handle("copilot-reply", (request) => {
+    const { runId, text } = asRecord(request) ?? {};
+    copilot.reply(runId, text);
   });
   handle("install-opencode", installOpenCode);
   handle("list-models", (value) => {
+    if (chatProfiles.find(value)) {
+      return trackConnectorJob(listHttpChatModels(chatProfiles.connection(value),
+        AbortSignal.any([connectorAbort.signal, AbortSignal.timeout(15_000)])));
+    }
     const providerId = requireProviderId(value);
     const signal = connectorAbort.signal;
     if (providerId === "claude") return trackConnectorJob(listClaudeModels(signal));
@@ -237,6 +290,7 @@ function registerHandlers() {
     trackConnectorJob(listOpenCodeEfforts(getOpenCodePath(), parseOpenCodeModel(value), connectorAbort.signal)));
   handle("set-model", (value) => {
     const payload = asRecord(value);
+    if (chatProfiles.find(payload?.providerId)) return trackConnectorJob(chatProfiles.setModel(payload?.providerId, payload?.model));
     const providerId = requireProviderId(payload?.providerId);
     const model = modelParsers[providerId](payload?.model);
     return trackConnectorJob((async () => {
@@ -426,13 +480,13 @@ app.whenReady().then(async () => {
     }
     if (saved.mode === "chat") mode = "chat";
   }
-  await Promise.all(PROVIDER_IDS.map(async (providerId) => {
+  await Promise.all([chatProfiles.load().catch((error) => console.error("Could not read chat connections", error)), ...PROVIDER_IDS.map(async (providerId) => {
     try {
       selectedModels[providerId] = modelParsers[providerId](await readFile(modelFile(providerId), "utf8"));
     } catch {
       // The default applies when there is no saved selection.
     }
-  }));
+  })]);
   session.defaultSession.setPermissionRequestHandler((_contents, _permission, respond) => respond(false));
   session.defaultSession.setPermissionCheckHandler(() => false);
   serveRenderer();

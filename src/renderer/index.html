@@ -92,6 +92,7 @@
               <span class="connector-row-status">Checking</span>
             </span>
           </button>
+          <div id="chat-connector-list" class="sidebar-list"></div>
         </div>
         <button type="button" id="refresh-connectors" class="button sidebar-action">Refresh</button>
       </aside>
@@ -201,11 +202,57 @@
       <section id="connector-catalog" aria-labelledby="connector-catalog-title" hidden>
         <div class="library-header">
           <h1 id="connector-catalog-title">Add connector</h1>
-          <p>Find a coding agent to use in Honeycomb.</p>
+          <p>Connect a coding agent, a model API, or the Copilot desktop app.</p>
         </div>
         <label class="visually-hidden" for="connector-search">Search connectors</label>
         <input id="connector-search" class="connector-input" type="search" placeholder="Search connectors" autocomplete="off">
         <div id="connector-results" class="connector-results" aria-live="polite"></div>
+      </section>
+      <section id="chat-connector-settings" aria-labelledby="chat-connector-title" hidden>
+        <div class="library-header">
+          <h1 id="chat-connector-title" tabindex="-1"></h1>
+          <p id="chat-connector-description"></p>
+        </div>
+        <div class="connector-card">
+          <form id="chat-connection-form">
+            <div class="model-field">
+              <label for="chat-connection-name">Connection name</label>
+              <input id="chat-connection-name" class="connector-input" required maxlength="100">
+            </div>
+            <div class="model-field">
+              <label for="chat-connection-url">API base URL</label>
+              <input id="chat-connection-url" class="connector-input" type="url" required maxlength="2048" placeholder="https://example.com/v1">
+            </div>
+            <div class="model-field">
+              <label for="chat-connection-key">API key</label>
+              <input id="chat-connection-key" class="connector-input" type="password" autocomplete="off" maxlength="8192">
+              <label id="chat-connection-clear-label" hidden><input type="checkbox" id="chat-connection-clear"> Clear saved API key</label>
+            </div>
+            <div class="model-field">
+              <label for="chat-connection-manual">Manual model ID (optional)</label>
+              <input id="chat-connection-manual" class="connector-input" maxlength="512" autocomplete="off">
+            </div>
+            <div class="connector-actions">
+              <button type="submit" id="save-chat-connection" class="button button-primary">Save connection</button>
+              <button type="button" id="remove-chat-connection" class="button" hidden>Remove connection</button>
+            </div>
+          </form>
+          <div id="chat-connection-controls" hidden>
+            <div class="model-field">
+              <label for="chat-connection-model">Model</label>
+              <div class="connector-actions">
+                <select id="chat-connection-model" class="connector-input" aria-describedby="chat-connection-status"></select>
+                <button type="button" id="refresh-chat-connection-models" class="button">Refresh models</button>
+                <button type="button" id="test-chat-connection" class="button">Test model</button>
+              </div>
+            </div>
+            <button type="button" id="use-chat-connection" class="button button-primary">Use in Chat</button>
+          </div>
+          <p id="chat-connection-status" class="connector-note" role="status"></p>
+          <div id="copilot-connection-controls" hidden>
+            <button type="button" id="use-copilot" class="button button-primary">Use in Chat</button>
+          </div>
+        </div>
       </section>
       <div id="connector-settings">
       <div class="library-header connector-heading">

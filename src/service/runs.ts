@@ -4,12 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { streamClaude } from "../providers/claude.js";
 import { parseCodexModel } from "../providers/codex.js";
+import type { ChatMessage } from "../providers/http-chat.js";
 import { checkProvider, providerEnvironment, providers } from "../providers/index.js";
 import { parseEffort, streamCodexChat, streamCodexEdit, streamOpenCodeChat, streamOpenCodeEdit, streamProvider } from "../providers/stream.js";
 import type { StreamEvent } from "../providers/stream.js";
 import type { ProviderAdapter, ProviderUsageEvent } from "../providers/types.js";
 import type {
-  FinishedRunStatus, FreebuffContext, ProjectFolder, ProviderId, Run, RunEventData, RunUsage, WorktreeState,
+  CliProviderId, FinishedRunStatus, FreebuffContext, ProjectFolder, Run, RunEventData, RunUsage, WorktreeState,
 } from "../shared/contracts.js";
 import { compareTurns, conversationContext, conversationId, followUpPrompt, runMode } from "../shared/conversations.js";
 import { supportsWorktreeEditing } from "../shared/editing.js";
@@ -54,8 +55,12 @@ function failureText(value: unknown, env: NodeJS.ProcessEnv, secrets: readonly s
 
 export function createRunService(
   publish: (run: Run) => void,
-  optionsForProvider: (provider: ProviderId) => { executable?: string; model?: string } = () => ({}),
+  optionsForProvider: (provider: CliProviderId) => { executable?: string; model?: string } = () => ({}),
   worktrees?: WorktreeManager,
+  chatOnly?: (id: unknown, model: unknown) => {
+    id: Run["providerId"]; name: string;
+    stream(run: Run, messages: ChatMessage[], signal: AbortSignal, receive: (event: StreamEvent) => void, update: () => void): Promise<void>;
+  } | undefined,
 ) {
   const history: Run[] = [];
   let active: ActiveRun | undefined;
@@ -77,10 +82,11 @@ export function createRunService(
     append(run, { type: "finished", status, text });
   }
 
-  async function execute(run: Run, provider: ProviderAdapter, prompt: string, signal: AbortSignal, effort?: string, chatModel?: string) {
+  async function execute(run: Run, provider: ProviderAdapter | undefined, prompt: string, signal: AbortSignal, effort?: string, chatModel?: string,
+    direct?: (receive: (event: StreamEvent) => void, update: () => void) => Promise<void>) {
     const env = providerEnvironment(provider);
     let worktreePath: string | undefined;
-    const codexChat = run.mode === "chat" && provider.id === "codex";
+    const codexChat = run.mode === "chat" && provider?.id === "codex";
     if (codexChat) {
       delete env.CODEX_API_KEY;
       delete env.OPENAI_API_KEY;
@@ -169,6 +175,15 @@ export function createRunService(
         }
     }
     try {
+      if (direct) {
+        await direct(receive, () => {
+          run.revision++;
+          publish(run);
+        });
+        if (signal.aborted) return finish(run, "cancelled", "Run stopped.");
+        return finish(run, "completed", "Run completed.");
+      }
+      if (!provider) throw new Error("Choose a connector.");
       const options = optionsForProvider(provider.id);
       const { connector, executable } = await checkProvider(provider, signal, options.executable);
       if (signal.aborted) {
@@ -215,7 +230,7 @@ export function createRunService(
         return finish(run, "cancelled", "Run stopped.");
       }
       const message = error instanceof Error ? error.message : error;
-      append(run, { type: "error", text: failureText(providerNotice ?? message, env, provider.secretEnvironment) || "The provider could not complete the run." });
+      append(run, { type: "error", text: failureText(providerNotice ?? message, env, provider?.secretEnvironment) || "The provider could not complete the run." });
       await attachDiff();
       finish(run, "failed", "Run failed.");
     } finally {
@@ -268,9 +283,11 @@ export function createRunService(
       if (mode === "code" && !folder) throw new Error("Choose a project folder first.");
       const providerId = payload?.providerId;
       const provider = typeof providerId === "string" ? providers.get(providerId) : undefined;
-      if (!provider) throw new Error("Choose Codex, OpenCode or Claude Code.");
-      const effort = parseEffort(payload?.effort, provider.id);
-      const chatModel = mode === "chat" && provider.id === "codex" ? parseCodexModel(payload?.model ?? "") || undefined : undefined;
+      const direct = !provider && mode === "chat" ? chatOnly?.(providerId, payload?.model) : undefined;
+      const connector = provider ?? direct;
+      if (!connector) throw new Error(mode === "code" ? "Choose Codex, OpenCode or Claude Code." : "Choose an available Chat connector.");
+      const effort = provider ? parseEffort(payload?.effort, provider.id) : undefined;
+      const chatModel = mode === "chat" && provider?.id === "codex" ? parseCodexModel(payload?.model ?? "") || undefined : undefined;
       const prompt = typeof payload?.prompt === "string" ? payload.prompt.trim() : "";
       if (!prompt || prompt.length > MAX_PROMPT_LENGTH || prompt.includes("\0")) {
         throw new Error(`Enter a task of 1 to ${MAX_PROMPT_LENGTH.toLocaleString("en-US")} characters.`);
@@ -280,7 +297,7 @@ export function createRunService(
       const thread = payload?.conversationId;
       if (thread !== undefined && typeof thread !== "string") throw new Error("Invalid chat.");
       if (edit && mode !== "code") throw new Error("Switch to Code to edit in a Git worktree.");
-      if (edit && !supportsWorktreeEditing(provider.id)) {
+      if (edit && !supportsWorktreeEditing(connector.id)) {
         throw new Error("Choose Codex, OpenCode or Claude Code to edit in a Git worktree.");
       }
       const turns = thread === undefined ? [] : conversation(thread);
@@ -289,7 +306,7 @@ export function createRunService(
       if (turns.some((turn) => runMode(turn) !== mode || turn.folder?.path !== (mode === "code" ? folder?.path : undefined))) {
         throw new Error("Open this chat in its original workspace before continuing.");
       }
-      if (first && turns.some((turn) => turn.providerId !== provider.id)) throw new Error(`Continue this chat with ${first.providerName}.`);
+      if (first && turns.some((turn) => turn.providerId !== connector.id)) throw new Error(`Continue this chat with ${first.providerName}.`);
       const context = first ? conversationContext(turns) : undefined;
       const freebuffContext = attachedFreebuff ?? turns.reduce<FreebuffContext | undefined>(
         (latest, turn) => turn.freebuffContext ?? latest, undefined,
@@ -300,8 +317,9 @@ export function createRunService(
         id: randomUUID(),
         ...(thread === undefined ? {} : { conversationId: thread, turnIndex: turns.length, context: context?.summary }),
         ...(attachedFreebuff ? { freebuffContext: attachedFreebuff } : {}),
-        providerId: provider.id,
-        providerName: provider.name,
+        providerId: connector.id,
+        providerName: connector.name,
+        ...(connector.id === "windows-copilot" ? { copilotThread: [...turns].reverse().find((turn) => turn.copilotThread)?.copilotThread } : {}),
         mode,
         folder: mode === "code" ? folder : undefined,
         ...(edit ? { edit: true } : {}),
@@ -316,10 +334,19 @@ export function createRunService(
       const controller = new AbortController();
       history.unshift(run);
       active = { run, controller };
-      append(run, { type: "started", text: `Starting ${provider.name}.` });
+      append(run, { type: "started", text: `Starting ${connector.name}.` });
       const previousTurns = context?.summary.includedTurns ? context.transcript : undefined;
+      const messages: ChatMessage[] = [];
+      if (direct) {
+        for (const entry of context?.messages ?? []) {
+          if (entry.status !== "completed" || !entry.assistant) continue;
+          messages.push({ role: "user", content: entry.user }, { role: "assistant", content: entry.assistant });
+        }
+        messages.push({ role: "user", content: prompt });
+      }
       active.done = execute(run, provider, followUpPrompt(prompt, previousTurns, freebuffContext),
-        controller.signal, effort, chatModel);
+        controller.signal, effort, chatModel,
+        direct && ((receive, update) => direct.stream(run, messages, controller.signal, receive, update)));
       return run.id;
     },
     stop(runId: string) {

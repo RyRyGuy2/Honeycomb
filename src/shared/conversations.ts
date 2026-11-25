@@ -24,7 +24,7 @@ function excerpt(text: string, limit: number) {
 }
 
 export function conversationContext(turns: readonly Run[]) {
-  const records: string[] = [];
+  const records: Array<{ user: string; assistant: string; toolCalls: string; status: Run["status"] }> = [];
   let length = 2;
   let shortenedTurns = 0;
   for (let index = turns.length - 1; index >= 0; index--) {
@@ -34,17 +34,17 @@ export function conversationContext(turns: readonly Run[]) {
     const reply = run.events.map((event) => event.type === "message" ? event.text : "").filter(Boolean).join("\n\n");
     const tools = run.events.map((event) => event.type === "tool_call" ? event.text : "").filter(Boolean).join("\n");
     function encode(scale: number) {
-      return JSON.stringify({
+      return {
         user: excerpt(prompt, Math.floor(MAX_PROMPT_EXCERPT * scale)),
         assistant: excerpt(reply, Math.floor(MAX_REPLY_EXCERPT * scale)),
         toolCalls: excerpt(tools, Math.floor(MAX_TOOL_EXCERPT * scale)),
         status,
-      });
+      };
     }
     const fullRecord = encode(1);
-    const needsSmallerExcerpt = fullRecord.length + 2 > MAX_CONTEXT_LENGTH;
+    const needsSmallerExcerpt = JSON.stringify(fullRecord).length + 2 > MAX_CONTEXT_LENGTH;
     const record = needsSmallerExcerpt ? encode(.25) : fullRecord;
-    const addedLength = record.length + (records.length ? 1 : 0);
+    const addedLength = JSON.stringify(record).length + (records.length ? 1 : 0);
     if (length + addedLength > MAX_CONTEXT_LENGTH) break;
     records.push(record);
     length += addedLength;
@@ -57,7 +57,8 @@ export function conversationContext(turns: readonly Run[]) {
     omittedTurns: turns.length - records.length,
     shortenedTurns,
   };
-  return { transcript: `[${records.reverse().join(",")}]`, summary };
+  const messages = records.reverse();
+  return { transcript: JSON.stringify(messages), messages, summary };
 }
 
 export function followUpPrompt(prompt: string, transcript?: string, freebuff?: FreebuffContext) {

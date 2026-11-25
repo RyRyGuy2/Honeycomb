@@ -1,4 +1,6 @@
-export type ProviderId = "codex" | "opencode" | "claude";
+export type CliProviderId = "codex" | "opencode" | "claude";
+export type ChatProfileId = `chat:${string}`;
+export type ProviderId = CliProviderId | ChatProfileId | "windows-copilot";
 export type WorkspaceMode = "code" | "chat";
 export type ConnectorStatus = "checking" | "detected" | "missing" | "unavailable";
 
@@ -10,6 +12,28 @@ export interface Connector {
   detail?: string;
   managed?: boolean;
   downloadAvailable?: boolean;
+  chatOnly?: boolean;
+}
+
+export type ChatPresetId = "ollama" | "freellmapi" | "lm-studio" | "openrouter" | "gemini" | "llama-cpp" | "vllm" | "custom";
+
+export interface ChatProfile {
+  id: ChatProfileId;
+  preset: ChatPresetId;
+  name: string;
+  baseUrl: string;
+  model: string;
+  manualModel?: string;
+  hasApiKey: boolean;
+}
+
+export interface SaveChatProfile {
+  id?: ChatProfileId;
+  preset: ChatPresetId;
+  name: string;
+  baseUrl: string;
+  manualModel: string;
+  apiKey?: string;
 }
 
 export interface ModelCatalog {
@@ -115,6 +139,8 @@ export interface Run {
   freebuffContext?: FreebuffContext;
   providerId: ProviderId;
   providerName: string;
+  copilotThread?: string;
+  copilotHandoff?: "prompt" | "reply";
   folder?: ProjectFolder;
   mode?: WorkspaceMode;
   /** True when this turn was asked to edit inside an isolated Git worktree. */
@@ -164,6 +190,12 @@ export interface IpcCalls {
   "copy-freebuff-export": () => void;
   state: () => AppState;
   "inspect-providers": () => Connector[];
+  "chat-profiles": () => ChatProfile[];
+  "save-chat-profile": (profile: SaveChatProfile) => ChatProfile;
+  "remove-chat-profile": (id: ChatProfileId) => void;
+  "test-chat-profile": (selection: { id: ChatProfileId; model: string }) => void;
+  "copilot-handoff": (runId: string) => void;
+  "copilot-reply": (request: { runId: string; text: string }) => void;
   "install-opencode": () => void;
   "list-models": (providerId: ProviderId) => ModelCatalog;
   "list-opencode-efforts": (model: string) => string[];
@@ -190,6 +222,12 @@ export interface HoneycombApi {
   copyFreebuffExport: Invoke<"copy-freebuff-export">;
   getState: Invoke<"state">;
   inspectProviders: Invoke<"inspect-providers">;
+  chatProfiles: Invoke<"chat-profiles">;
+  saveChatProfile: Invoke<"save-chat-profile">;
+  removeChatProfile: Invoke<"remove-chat-profile">;
+  testChatProfile: Invoke<"test-chat-profile">;
+  copilotHandoff: Invoke<"copilot-handoff">;
+  copilotReply: Invoke<"copilot-reply">;
   installOpenCode: Invoke<"install-opencode">;
   listModels: Invoke<"list-models">;
   listOpenCodeEfforts: Invoke<"list-opencode-efforts">;

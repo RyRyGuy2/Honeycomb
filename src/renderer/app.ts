@@ -1,9 +1,10 @@
 import type {
-  Connector, ConnectorStatus, ConversationContextSummary, DiffFile, HoneycombApi, ModelCatalog, ModelSelection, ProjectFolder, ProviderId, Run, RunStatus,
+  ChatPresetId, ChatProfile, CliProviderId, Connector, ConnectorStatus, ConversationContextSummary, DiffFile, HoneycombApi, ModelCatalog, ModelSelection, ProjectFolder, ProviderId, Run, RunStatus,
   RunUsage, RunWorktree, SidebarMenuRequest, WorkspaceMode,
 } from "../shared/contracts.js";
 import { compareTurns, conversationContext, conversationId, runMode } from "../shared/conversations.js";
 import { supportsWorktreeEditing } from "../shared/editing.js";
+import { chatPresets, isChatPreset } from "../shared/chat-presets.js";
 import type { FreebuffAttachment, FreebuffReview, WorktreeRecord } from "../shared/contracts.js";
 
 declare global {
@@ -22,7 +23,7 @@ const installCommands = {
   opencode: "npm install -g @opencode/cli",
   claude: "npm install -g @anthropic-ai/claude-code@latest",
   freebuff: "npm install -g freebuff",
-} satisfies Record<ProviderId | "freebuff", string>;
+} satisfies Record<CliProviderId | "freebuff", string>;
 let freebuffWorktrees: WorktreeRecord[] = [];
 const freebuffReviews = new Map<string, FreebuffReview>();
 const freebuffErrors = new Map<string, string>();
@@ -38,6 +39,13 @@ const providerField = get("provider", HTMLSelectElement);
 const chatModelField = get("chat-model", HTMLSelectElement);
 const thinkingField = get("thinking-level", HTMLSelectElement);
 const connectorModelField = get("connector-model", HTMLSelectElement);
+const chatConnectionModelField = get("chat-connection-model", HTMLSelectElement);
+const connectionForm = get("chat-connection-form", HTMLFormElement);
+const connectionName = get("chat-connection-name", HTMLInputElement);
+const connectionUrl = get("chat-connection-url", HTMLInputElement);
+const connectionKey = get("chat-connection-key", HTMLInputElement);
+const connectionClear = get("chat-connection-clear", HTMLInputElement);
+const connectionManual = get("chat-connection-manual", HTMLInputElement);
 const runButton = get("run-task", HTMLButtonElement);
 const accessPicker = get("project-access", HTMLSelectElement);
 const editAccessOption = get("project-access-edit", HTMLOptionElement);
@@ -62,12 +70,12 @@ const connectorDescriptions = {
   codex: "Uses the Codex CLI’s read-only sandbox.",
   opencode: "Uses OpenCode’s scoped agent permissions to read, search and edit in a worktree.",
   claude: "Uses Claude Code with read and search tools only, no MCP servers, and no project settings.",
-} satisfies Record<ProviderId, string>;
+} satisfies Record<CliProviderId, string>;
 const providerNames = {
   codex: "Codex",
   opencode: "OpenCode",
   claude: "Claude Code",
-} satisfies Record<ProviderId, string>;
+} satisfies Record<CliProviderId, string>;
 const usageLabels = [
   ["inputTokens", "Input tokens"],
   ["outputTokens", "Output tokens"],
@@ -95,6 +103,10 @@ const collapsedProjects = new Set<string>();
 let sidebarMenuOpen = false;
 let selectedChatId: string | undefined;
 let selectedConnectorId: ProviderId = "codex";
+let profilePreset: ChatPresetId | undefined;
+let profiles: ChatProfile[] = [];
+let profileRevision = 0;
+let profileMessage = "";
 let catalogOpen = false;
 const modelCatalogs: Partial<Record<ProviderId, ModelCatalog>> = {};
 const modelRequests: Partial<Record<ProviderId, Promise<void>>> = {};
@@ -149,7 +161,7 @@ function showView(name: string) {
     if (selected) button.setAttribute("aria-current", "page");
     else button.removeAttribute("aria-current");
   }
-  if (name === "connectors" && !catalogOpen && !modelCatalogs[selectedConnectorId]) {
+  if (name === "connectors" && !catalogOpen && !profilePreset && supportsWorktreeEditing(selectedConnectorId) && !modelCatalogs[selectedConnectorId]) {
     void refreshModels(selectedConnectorId);
   }
   if (name === "chats") renderComposerProvider();
@@ -223,8 +235,9 @@ function renderControls() {
   const freebuffOption = get("freebuff-provider", HTMLOptionElement);
   freebuffOption.hidden = mode !== "code";
   freebuffOption.disabled = mode !== "code";
-  if (mode !== "code" && providerField.value === "freebuff") providerField.value = "codex";
   const freebuff = providerField.value === "freebuff";
+  const copilot = providerId === "windows-copilot";
+  const modelRequired = providerId.startsWith("chat:");
   const resumeFreebuff = freebuff && Boolean(latestActiveFreebuff());
   const attachment = pendingFreebuff();
   const contextStatus = get("composer-freebuff-status");
@@ -235,8 +248,8 @@ function renderControls() {
     : "Freebuff context included";
   removeAttachment.hidden = freebuff || !attachment;
   removeAttachment.disabled = busy;
-  get("chat-model-control").hidden = freebuff;
-  thinkingField.hidden = freebuff;
+  get("chat-model-control").hidden = freebuff || copilot;
+  thinkingField.hidden = freebuff || copilot || modelRequired;
   providerField.disabled = Boolean(selectedChatId) || busy;
   projectPicker.disabled = choosing || busy;
   for (const button of document.querySelectorAll<HTMLButtonElement>(".project-new-chat")) {
@@ -249,7 +262,7 @@ function renderControls() {
   stop.disabled = active?.status === "stopping";
   stop.textContent = stop.disabled ? "Stopping…" : "Stop run";
   runButton.disabled = needsProject || busy || choosing || !promptField.value.trim() ||
-    (!freebuff && (modelPending || provider?.status !== "detected"));
+    (!freebuff && (modelPending || provider?.status !== "detected" || (modelRequired && !chatModelField.value)));
   const freshFreebuff = document.querySelector<HTMLButtonElement>("[data-freebuff-fresh]");
   if (freshFreebuff) freshFreebuff.disabled = !freebuff || runButton.disabled;
   const canEdit = mode === "code" && supportsWorktreeEditing(providerId);
@@ -270,12 +283,33 @@ function renderControls() {
   if (!message && provider?.status === "checking") message = `Checking for ${provider.name}…`;
   if (!message && provider?.status !== "detected") message = `${provider?.name ?? "The connector"} is unavailable. See Connectors for details.`;
   if (!message && modelPending) message = saving ? `Saving ${provider?.name} model…` : `Loading ${provider?.name} models…`;
+  if (!message && modelRequired && !chatModelField.value) message = "Choose a model or enter a model ID in Connectors.";
   if (chatStatus.textContent !== message) chatStatus.textContent = message;
 }
 
 function chatProviderId(): ProviderId {
   const value = providerField.value;
-  return value === "opencode" || value === "claude" ? value : "codex";
+  return value === "windows-copilot" || value.startsWith("chat:") || supportsWorktreeEditing(value) ? value as ProviderId : "codex";
+}
+
+function renderChatProviders(first = chatTurns()[0]) {
+  const previous = first?.providerId ?? providerField.value;
+  providerField.querySelectorAll("[data-chat-connector]").forEach((option) => option.remove());
+  if (mode === "chat") {
+    const available = connectors.filter((connector) => connector.chatOnly);
+    if (first && !supportsWorktreeEditing(first.providerId) && !available.some((connector) => connector.id === first.providerId)) {
+      available.push({ id: first.providerId, name: first.providerName, status: "missing" });
+    }
+    for (const connector of available) {
+      if (connector.status !== "detected" && connector.id !== first?.providerId) continue;
+      const option = element("option", "", connector.name);
+      option.value = connector.id;
+      option.dataset.chatConnector = "";
+      providerField.append(option);
+    }
+  }
+  providerField.value = mode === "chat" && previous === "freebuff" ? "codex" : previous;
+  if (!providerField.value) providerField.value = "codex";
 }
 
 function renderComposerProvider() {
@@ -284,7 +318,7 @@ function renderComposerProvider() {
     return;
   }
   const providerId = chatProviderId();
-  if (!get("chats").hidden && !modelCatalogs[providerId] &&
+  if (providerId !== "windows-copilot" && !get("chats").hidden && !modelCatalogs[providerId] &&
       connectors.some((connector) => connector.id === providerId && connector.status === "detected")) {
     void refreshModels(providerId);
   }
@@ -868,6 +902,7 @@ function renderThread(turns: readonly Run[]) {
     for (const event of run.events) {
       if (event.type === "message") turn.append(agentReply(run.providerName, event.text));
     }
+    if (run.status === "running" && run.copilotHandoff) turn.append(copilotReplyForm(run));
     const tests = runTests(run);
     if (tests) turn.append(tests);
     const changes = runChanges(run, index === turns.length - 1);
@@ -883,6 +918,49 @@ function renderThread(turns: readonly Run[]) {
   }
   if (atBottom || switched) thread.scrollTop = thread.scrollHeight;
   lastThreadId = selectedChatId;
+}
+
+function copilotReplyForm(run: Run) {
+  const form = element("form", "copilot-reply model-field");
+  const label = element("label", "", "Paste the reply from Microsoft Copilot");
+  const field = element("textarea", "connector-input");
+  field.id = `copilot-reply-${run.id}`;
+  field.required = true;
+  field.maxLength = 1_000_000;
+  label.htmlFor = field.id;
+  const status = element("p", "connector-note", run.copilotHandoff === "prompt"
+    ? run.copilotThread ? "Paste and send the copied prompt in the original Copilot conversation."
+      : "Open a new chat in the Copilot app, then paste and send the copied prompt."
+    : "Copy the completed reply from the Copilot app.");
+  status.setAttribute("role", "status");
+  const buttons = element("div", "connector-actions");
+  const submit = element("button", "button button-primary", "Save reply");
+  if (run.copilotHandoff === "prompt") {
+    const copy = element("button", "button", "Copy prompt");
+    copy.type = "button";
+    copy.addEventListener("click", async () => {
+      try {
+        await api.copilotHandoff(run.id);
+        status.textContent = "Prompt copied.";
+      } catch (error) {
+        status.textContent = error instanceof Error ? error.message : "Could not copy the prompt.";
+      }
+    });
+    buttons.append(copy);
+  }
+  buttons.append(submit);
+  form.append(status, label, field, buttons);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    submit.disabled = true;
+    try {
+      await api.copilotReply({ runId: run.id, text: field.value });
+    } catch (error) {
+      status.textContent = error instanceof Error ? error.message : "Could not save the reply.";
+      submit.disabled = false;
+    }
+  });
+  return form;
 }
 
 function facts(items: ReadonlyArray<readonly [label: string, value: string]>) {
@@ -970,8 +1048,9 @@ function renderChats() {
     promptField.value = drafts.get(key) ?? "";
     draftKey = key;
   }
-  const providerChanged = first && providerField.value !== first.providerId;
-  if (providerChanged) providerField.value = first.providerId;
+  const previousProvider = providerField.value;
+  renderChatProviders(first);
+  const providerChanged = providerField.value !== previousProvider;
   const continueChat = Boolean(first);
   promptField.placeholder = continueChat ? "Ask a follow-up…" : mode === "chat" ? "Ask a question…" : "Ask about your project…";
   const title = get("chat-title");
@@ -1038,8 +1117,29 @@ function renderConnectors() {
     else button.removeAttribute("aria-current");
   }
 
+  const chatRows = connectors.filter((connector) => connector.chatOnly &&
+    (connector.id !== "windows-copilot" || connector.status === "detected" || connector.id === selectedConnectorId));
+  get("chat-connector-list").replaceChildren(...chatRows.map((connector) => {
+    const button = element("button", "sidebar-item");
+    button.type = "button";
+    button.setAttribute("aria-controls", "chat-connector-settings");
+    if (!catalogOpen && connector.id === selectedConnectorId) button.setAttribute("aria-current", "true");
+    const mark = element("span", "connector-monogram", connector.name.charAt(0));
+    mark.setAttribute("aria-hidden", "true");
+    const row = element("span", "connector-row");
+    row.append(element("span", "", connector.name), element("span", "connector-row-status", "Chat"));
+    button.append(mark, row);
+    button.addEventListener("click", () => selectConnector(connector.id));
+    return button;
+  }));
+  const chatSettings = Boolean(profilePreset) || selectedConnectorId === "windows-copilot";
+  get("connector-settings").hidden = catalogOpen || chatSettings;
+  get("chat-connector-settings").hidden = catalogOpen || !chatSettings;
+  if (catalogOpen) return renderCatalog();
+  if (chatSettings) return renderChatConnection();
+
   const connector = connectors.find((entry) => entry.id === selectedConnectorId);
-  if (!connector) return;
+  if (!connector || !supportsWorktreeEditing(connector.id)) return;
   const mark = get("connector-mark");
   mark.textContent = connector.name.charAt(0);
   mark.classList.toggle("opencode", connector.id === "opencode");
@@ -1068,10 +1168,9 @@ function renderConnectors() {
   download.disabled = connectorBusy;
   get("test-opencode", HTMLButtonElement).disabled = connector.status !== "detected" || connectorBusy || Boolean(modelRequests.opencode);
   renderModels();
-  if (catalogOpen) renderCatalog();
 }
 
-function installCommand(id: ProviderId | "freebuff", name: string) {
+function installCommand(id: CliProviderId | "freebuff", name: string) {
   const row = element("div", "connector-install-command");
   const command = installCommands[id];
   const copy = element("button", "button button-small", "Copy");
@@ -1095,8 +1194,11 @@ function installCommand(id: ProviderId | "freebuff", name: string) {
 
 function renderCatalog() {
   const query = get("connector-search", HTMLInputElement).value.trim().toLowerCase();
-  const results = connectors.filter(({ name, id }) =>
-    `${name} ${connectorDescriptions[id]}`.toLowerCase().includes(query));
+  const results = connectors.flatMap((connector) => {
+    const { id, name } = connector;
+    return supportsWorktreeEditing(id) && `${name} ${connectorDescriptions[id]}`.toLowerCase().includes(query)
+      ? [{ ...connector, id }] : [];
+  });
   const cards = results.map((connector) => {
     const card = element("article", "connector-result");
     const text = element("div");
@@ -1145,18 +1247,91 @@ function renderCatalog() {
     card.append(info, use);
     cards.push(card);
   }
+  function addChatCard(name: string, description: string, label: string, choose: () => void) {
+    if (!`${name} ${description}`.toLowerCase().includes(query)) return;
+    const card = element("article", "connector-result");
+    const info = element("div");
+    info.append(element("h2", "", name), element("p", "connector-note", description));
+    const button = element("button", "button button-small", label);
+    button.type = "button";
+    button.addEventListener("click", choose);
+    card.append(info, button);
+    cards.push(card);
+  }
+  for (const [id, preset] of Object.entries(chatPresets)) {
+    if (!isChatPreset(id)) continue;
+    addChatCard(preset.name, preset.description, "Configure", () => {
+      openChatConnection(id);
+      get("chat-connector-title").focus();
+    });
+  }
+  addChatCard("Microsoft Copilot for Windows", "Chat through the signed-in Copilot desktop app.", "View Copilot", () => selectConnector("windows-copilot"));
   get("connector-results").replaceChildren(...(cards.length ? cards : [element("p", "connector-note", "No connectors match your search.")]));
 }
 
 function selectConnector(id: ProviderId) {
   if (id !== selectedConnectorId) get("connector-action-status").textContent = "";
+  const profile = profiles.find((entry) => entry.id === id);
+  if (profile) {
+    openChatConnection(profile.preset, profile);
+    get("chat-connector-title").focus();
+    return;
+  }
+  profilePreset = undefined;
+  profileMessage = "";
   selectedConnectorId = id;
   catalogOpen = false;
   get("connector-catalog").hidden = true;
   get("connector-settings").hidden = false;
   get("add-connector").removeAttribute("aria-current");
   renderConnectors();
-  if (!modelCatalogs[id] && !connectorBusy) void refreshModels(id);
+  if (id === "windows-copilot") get("chat-connector-title").focus();
+  else if (!modelCatalogs[id] && !connectorBusy) void refreshModels(id);
+}
+
+function openChatConnection(preset: ChatPresetId, profile?: ChatProfile) {
+  const defaults = chatPresets[preset];
+  profilePreset = preset;
+  profileMessage = "";
+  selectedConnectorId = profile?.id ?? "codex";
+  catalogOpen = false;
+  get("connector-catalog").hidden = true;
+  get("add-connector").removeAttribute("aria-current");
+  connectionForm.reset();
+  connectionName.value = profile?.name ?? defaults.name;
+  connectionUrl.value = profile?.baseUrl ?? defaults.baseUrl;
+  connectionManual.value = profile?.manualModel ?? "";
+  connectionKey.required = defaults.requiresKey && !profile?.hasApiKey;
+  connectionKey.placeholder = profile?.hasApiKey ? "Saved key" : defaults.requiresKey ? "Required" : "Optional";
+  get("chat-connection-clear-label").hidden = defaults.requiresKey || !profile?.hasApiKey;
+  renderConnectors();
+  if (profile && !modelCatalogs[profile.id]) void refreshModels(profile.id);
+}
+
+function renderChatConnection() {
+  const profile = profiles.find((entry) => entry.id === selectedConnectorId);
+  const copilot = !profilePreset && selectedConnectorId === "windows-copilot";
+  const connector = connectors.find((entry) => entry.id === selectedConnectorId);
+  get("chat-connector-title").textContent = copilot ? "Microsoft Copilot for Windows"
+    : profile?.name ?? (profilePreset ? chatPresets[profilePreset].name : "");
+  get("chat-connector-description").textContent = copilot ? "Connects to the signed-in Copilot desktop app."
+    : profilePreset ? chatPresets[profilePreset].description : "";
+  connectionForm.hidden = copilot;
+  get("chat-connection-controls").hidden = !profile;
+  get("copilot-connection-controls").hidden = !copilot;
+  get("use-copilot", HTMLButtonElement).disabled = connector?.status !== "detected";
+  get("save-chat-connection", HTMLButtonElement).disabled = connectorBusy;
+  get("remove-chat-connection").hidden = !profile;
+  get("remove-chat-connection", HTMLButtonElement).disabled = connectorBusy;
+  const loading = Boolean(profile && modelRequests[profile.id]);
+  get("refresh-chat-connection-models", HTMLButtonElement).disabled = connectorBusy || loading;
+  get("use-chat-connection", HTMLButtonElement).disabled = connectorBusy;
+  if (profile) {
+    renderModelPicker(chatConnectionModelField, profile.id);
+    get("test-chat-connection", HTMLButtonElement).disabled = connectorBusy || loading || !chatConnectionModelField.value;
+  }
+  get("chat-connection-status").textContent = copilot ? connector?.detail ?? "Checking for the Windows app…"
+    : profileMessage || (loading ? "Looking for models…" : (profile && modelCatalogs[profile.id]?.localError) || "");
 }
 
 function shortModelName(model: ModelCatalog["models"][number]) {
@@ -1167,9 +1342,12 @@ function renderModelPicker(select: HTMLSelectElement, providerId: ProviderId) {
   const codexChat = select === chatModelField && mode === "chat" && providerId === "codex";
   const catalog = modelCatalogs[providerId];
   const loading = Boolean(modelRequests[providerId]);
-  const providerName = providerNames[providerId];
-  const fallback = element("option", "", loading && !catalog ? "Loading models…" : `${providerName} default`);
+  const providerName = supportsWorktreeEditing(providerId) ? providerNames[providerId]
+    : connectors.find((connector) => connector.id === providerId)?.name ?? "Connector";
+  const direct = providerId.startsWith("chat:");
+  const fallback = element("option", "", loading && !catalog ? "Loading models…" : direct ? "Choose a model" : `${providerName} default`);
   fallback.value = "";
+  fallback.disabled = direct;
   const local = element("optgroup");
   local.label = `Listed by ${providerName}`;
   const online = element("optgroup");
@@ -1236,7 +1414,7 @@ function renderThinking(providerId: ProviderId) {
   thinkingField.title = effortRequests.has(key) ? "Looking for thinking levels…"
     : choices.length ? "Thinking level" : "This model uses its default thinking level";
   const active = chatModelField.selectedOptions[0];
-  if (active && !chatModelField.disabled) {
+  if (active && !chatModelField.disabled && supportsWorktreeEditing(providerId)) {
     const label = active.textContent ?? "";
     const suffix = " · " + effortLabel(current);
     active.textContent = (label.length > 22 ? label.slice(0, 21) + "…" : label) + suffix;
@@ -1246,6 +1424,7 @@ function renderThinking(providerId: ProviderId) {
 function renderModels() {
   renderModelPicker(chatModelField, chatProviderId());
   renderThinking(chatProviderId());
+  if (!supportsWorktreeEditing(selectedConnectorId) || profilePreset) return;
   renderModelPicker(connectorModelField, selectedConnectorId);
   const catalog = modelCatalogs[selectedConnectorId];
   const loading = Boolean(modelRequests[selectedConnectorId]);
@@ -1262,11 +1441,12 @@ function refreshModels(providerId: ProviderId) {
   if (current) return current;
   const request = api.listModels(providerId).then((catalog) => {
     modelCatalogs[providerId] = catalog;
-  }).catch(() => {
-    modelCatalogs[providerId] ??= { models: [], selected: "", localError: "Could not load models. Try refreshing." };
+  }).catch((error) => {
+    modelCatalogs[providerId] = { models: [], selected: "", localError: actionMessage(error, "Could not load models. Try refreshing.") };
   }).finally(() => {
     delete modelRequests[providerId];
     renderConnectors();
+    renderModels();
     renderControls();
   });
   modelRequests[providerId] = request;
@@ -1312,6 +1492,15 @@ async function saveModel(picker: HTMLSelectElement) {
   pendingModel = { providerId, model };
   renderControls();
   try {
+    if (providerId.startsWith("chat:")) {
+      await profileAction(async () => {
+        await api.setModel({ providerId, model });
+        catalog.selected = model;
+        const profile = profiles.find((entry) => entry.id === providerId);
+        if (profile) profile.model = model;
+      }, "Saving model selection…", "Model selection saved.", fromChat);
+      return;
+    }
     await connectorAction(providerId, async () => {
       await api.setModel({ providerId, model });
       catalog.selected = model;
@@ -1321,6 +1510,62 @@ async function saveModel(picker: HTMLSelectElement) {
     renderModels();
     renderControls();
   }
+}
+
+function actionMessage(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, "") : fallback;
+}
+
+async function profileAction(action: () => Promise<void>, pending: string, success: string, fromChat = false) {
+  if (connectorBusy) return;
+  connectorBusy = true;
+  profileMessage = pending;
+  renderConnectors();
+  try {
+    await action();
+    profileMessage = success;
+  } catch (error) {
+    profileMessage = actionMessage(error, "Honeycomb could not complete this action.");
+    if (fromChat) showError(error);
+  } finally {
+    connectorBusy = false;
+    renderConnectors();
+    renderComposerProvider();
+  }
+}
+
+function saveChatConnection(event: SubmitEvent) {
+  event.preventDefault();
+  const preset = profilePreset;
+  if (!preset || connectorBusy) return;
+  const previous = profiles.find((entry) => entry.id === selectedConnectorId);
+  const key = connectionClear.checked ? "" : connectionKey.value.trim() || undefined;
+  void profileAction(async () => {
+    const profile = await api.saveChatProfile({
+      id: previous?.id, preset, name: connectionName.value, baseUrl: connectionUrl.value,
+      manualModel: connectionManual.value, apiKey: key,
+    });
+    profileRevision++;
+    profiles = [...profiles.filter((entry) => entry.id !== profile.id), profile];
+    connectors = [...connectors.filter((entry) => entry.id !== profile.id),
+      { id: profile.id, name: profile.name, status: "detected", chatOnly: true }];
+    await modelRequests[profile.id];
+    delete modelCatalogs[profile.id];
+    if (!catalogOpen && profilePreset === preset && selectedConnectorId === (previous?.id ?? "codex")) {
+      openChatConnection(preset, profile);
+    }
+    renderChatProviders();
+  }, "Saving connection…", "");
+}
+
+async function useInChat(id: ProviderId) {
+  if (mode !== "chat") await switchMode("chat");
+  if (mode !== "chat" || activeRun() || starting) return;
+  selectChat(undefined);
+  providerField.value = id;
+  actionError = "";
+  showView("chats");
+  promptField.focus();
 }
 
 async function downloadOpenCode() {
@@ -1335,16 +1580,21 @@ async function downloadOpenCode() {
 async function refreshConnectors() {
   if (checking) return;
   checking = true;
+  const revision = profileRevision;
   renderConnectors();
   try {
-    connectors = await api.inspectProviders();
+    const [inspected, saved] = await Promise.all([api.inspectProviders(), api.chatProfiles()]);
+    if (revision === profileRevision) profiles = saved;
+    connectors = [...inspected.filter((entry) => !entry.id.startsWith("chat:")),
+      ...profiles.map(({ id, name }): Connector => ({ id, name, status: "detected", chatOnly: true }))];
   } catch {
-    connectors = connectors.map((connector) => ({
+    connectors = connectors.map((connector) => connector.id.startsWith("chat:") ? connector : ({
       ...connector, status: "unavailable", detail: "The installation check could not run.",
     }));
   } finally {
     checking = false;
     renderConnectors();
+    renderChatProviders();
     renderComposerProvider();
   }
 }
@@ -1371,6 +1621,7 @@ get("add-connector").addEventListener("click", () => {
   catalogOpen = true;
   get("connector-catalog").hidden = false;
   get("connector-settings").hidden = true;
+  get("chat-connector-settings").hidden = true;
   get("add-connector").setAttribute("aria-current", "true");
   renderConnectors();
   get("connector-search").focus();
@@ -1381,9 +1632,35 @@ get("refresh-models").addEventListener("click", () => { void refreshModels(selec
 get("test-opencode").addEventListener("click", () => {
   void connectorAction("opencode", () => api.testOpenCode(), "Testing the selected model…", "OpenCode returned a model response.");
 });
-for (const picker of [connectorModelField, chatModelField]) {
+for (const picker of [connectorModelField, chatModelField, chatConnectionModelField]) {
   picker.addEventListener("change", () => { void saveModel(picker); });
 }
+connectionForm.addEventListener("submit", saveChatConnection);
+get("refresh-chat-connection-models").addEventListener("click", () => {
+  profileMessage = "";
+  void refreshModels(selectedConnectorId);
+});
+get("test-chat-connection").addEventListener("click", () => {
+  const profile = profiles.find((entry) => entry.id === selectedConnectorId);
+  const model = chatConnectionModelField.value;
+  if (profile && model) void profileAction(() => api.testChatProfile({ id: profile.id, model }), "Testing the selected model…", "The model returned a reply.");
+});
+get("use-chat-connection").addEventListener("click", () => { void useInChat(selectedConnectorId); });
+get("use-copilot").addEventListener("click", () => { void useInChat("windows-copilot"); });
+get("remove-chat-connection").addEventListener("click", () => {
+  const profile = profiles.find((entry) => entry.id === selectedConnectorId);
+  if (!profile || !window.confirm(`Remove ${profile.name}? Chat history will still be available.`)) return;
+  void profileAction(async () => {
+    await api.removeChatProfile(profile.id);
+    profileRevision++;
+    profiles = profiles.filter((entry) => entry.id !== profile.id);
+    connectors = connectors.filter((entry) => entry.id !== profile.id);
+    await modelRequests[profile.id];
+    delete modelCatalogs[profile.id];
+    selectConnector("codex");
+    renderChatProviders();
+  }, "Removing connection…", "");
+});
 get("select-solo").addEventListener("click", () => get("solo-title").focus());
 get("use-solo").addEventListener("click", () => {
   showView("chats");

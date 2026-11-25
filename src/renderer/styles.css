@@ -326,6 +326,7 @@ main { grid-column: 3; }
 .project-disclosure[aria-expanded="true"]::before { transform: translateY(-2px) rotate(45deg); }
 
 .sidebar-list { display: grid; gap: 5px; }
+#chat-connector-list:empty { display: none; }
 .sidebar-item { display: flex; align-items: center; gap: 9px; font-weight: 620; }
 
 .workflow-marker {
@@ -714,6 +715,8 @@ main { grid-column: 3; }
 .model-field .connector-note { margin-top: 0; }
 .connector-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .connector-actions select { flex: 1 1 200px; }
+.copilot-reply { margin: 12px 0; }
+.copilot-reply textarea { width: 100%; min-height: 96px; resize: vertical; }
 #opencode-actions > .connector-note { margin-top: 6px; }
 #connector-action-status:empty { display: none; }
 .connector-facts { display: grid; gap: 10px; font-size: 13px; }
