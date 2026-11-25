@@ -6,7 +6,7 @@ import { listCodexModels } from "../providers/codex-models.js";
 import { parseCodexModel } from "../providers/codex.js";
 import { inspectProviders, providerEnvironment } from "../providers/index.js";
 import { installOpenCodeRelease, managedOpenCodePath, openCodeRelease } from "../providers/opencode-install.js";
-import { listOpenCodeModels, testOpenCode } from "../providers/opencode-models.js";
+import { listOpenCodeEfforts, listOpenCodeModels, testOpenCode } from "../providers/opencode-models.js";
 import { opencode, parseOpenCodeModel } from "../providers/opencode.js";
 import { runProcess } from "../service/process.js";
 import { createRunService } from "../service/runs.js";
@@ -139,6 +139,8 @@ function registerHandlers() {
       ? listCodexModels(selectedModels.codex, signal)
       : listOpenCodeModels(getOpenCodePath(), selectedModels.opencode, signal));
   });
+  handle("list-opencode-efforts", (value) =>
+    trackConnectorJob(listOpenCodeEfforts(getOpenCodePath(), parseOpenCodeModel(value), connectorAbort.signal)));
   handle("set-model", (value) => {
     const payload = asRecord(value);
     const providerId = requireProviderId(payload?.providerId);

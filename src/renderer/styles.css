@@ -406,7 +406,7 @@ main { grid-column: 3; }
 .composer-options { min-width: 0; flex-wrap: wrap; }
 .composer-actions > .button { flex: none; }
 #chat-model-control { min-width: 0; max-width: 100%; }
-.composer-options #chat-model { max-width: min(220px, 100%); text-overflow: ellipsis; }
+.composer-options #chat-model { max-width: min(210px, 100%); text-overflow: ellipsis; }
 .composer-select {
   max-width: 125px;
   padding: 5px 2px;

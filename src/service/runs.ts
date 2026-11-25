@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { checkProvider, providerEnvironment, providers } from "../providers/index.js";
-import { streamProvider } from "../providers/stream.js";
+import { parseEffort, streamProvider } from "../providers/stream.js";
 import type { ProviderAdapter, ProviderUsageEvent } from "../providers/types.js";
 import type { FinishedRunStatus, ProjectFolder, ProviderId, Run, RunEventData, RunUsage } from "../shared/contracts.js";
 import { asRecord } from "../shared/records.js";
@@ -61,7 +61,7 @@ export function createRunService(
     append(run, { type: "finished", status, text });
   }
 
-  async function execute(run: Run, provider: ProviderAdapter, signal: AbortSignal) {
+  async function execute(run: Run, provider: ProviderAdapter, signal: AbortSignal, effort?: string) {
     const env = providerEnvironment(provider);
     let providerNotice: string | undefined;
     const replies = new Map<string, Extract<Run["events"][number], { text: string }>>();
@@ -111,7 +111,7 @@ export function createRunService(
           const text = displayText(event.text, MAX_MESSAGE_LENGTH);
           if (text) append(run, { type: event.type, text });
         }
-      });
+      }, effort);
       if (signal.aborted) return finish(run, "cancelled", "Run stopped.");
       finish(run, "completed", "Run completed.");
     } catch (error) {
@@ -149,6 +149,7 @@ export function createRunService(
       const providerId = payload?.providerId;
       const provider = typeof providerId === "string" ? providers.get(providerId) : undefined;
       if (!provider) throw new Error("Choose Codex or OpenCode.");
+      const effort = parseEffort(payload?.effort, provider.id);
       const prompt = typeof payload?.prompt === "string" ? payload.prompt.trim() : "";
       if (!prompt || prompt.length > MAX_PROMPT_LENGTH || prompt.includes("\0")) {
         throw new Error(`Enter a task of 1 to ${MAX_PROMPT_LENGTH.toLocaleString("en-US")} characters.`);
@@ -170,7 +171,7 @@ export function createRunService(
       history.unshift(run);
       active = { run, controller };
       append(run, { type: "started", text: `Starting ${provider.name}.` });
-      active.done = execute(run, provider, controller.signal);
+      active.done = execute(run, provider, controller.signal, effort);
       return run.id;
     },
     stop(runId: string) {

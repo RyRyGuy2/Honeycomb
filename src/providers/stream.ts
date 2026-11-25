@@ -1,6 +1,7 @@
 import { asRecord } from "../shared/records.js";
 import type { ProviderId } from "../shared/contracts.js";
 import { runJsonRpc } from "../service/json-rpc.js";
+import type { JsonRpc } from "../service/json-rpc.js";
 import { isOpenCodeV2, opencode } from "./opencode.js";
 import type { ProviderUsageEvent } from "./types.js";
 
@@ -12,7 +13,7 @@ export type StreamEvent =
 type Transport = Parameters<typeof runJsonRpc>[0];
 type Publish = (event: StreamEvent) => void;
 
-function codexStream(transport: Transport, prompt: string, model: string | undefined, publish: Publish) {
+function codexStream(transport: Transport, prompt: string, model: string | undefined, publish: Publish, effort?: string) {
   let notifyTurn: (error?: Error) => void = () => {};
   const turnDone = new Promise<Error | undefined>((resolve) => { notifyTurn = resolve; });
   return runJsonRpc({
@@ -63,26 +64,63 @@ function codexStream(transport: Transport, prompt: string, model: string | undef
     });
     const threadId = asRecord(response.thread)?.id;
     if (typeof threadId !== "string") throw new Error("Codex did not start a thread.");
-    await rpc.request("turn/start", { threadId, input: [{ type: "text", text: prompt, text_elements: [] }] });
+    await rpc.request("turn/start", { threadId, effort, input: [{ type: "text", text: prompt, text_elements: [] }] });
     const failure = await turnDone;
     if (failure) throw failure;
   });
 }
 
+function openCodeTransport(transport: Transport, version?: string): Transport {
+  const modern = isOpenCodeV2(version);
+  return {
+    ...transport,
+    args: [...transport.args, "acp", ...(modern ? [] : ["--pure"]), "--log-level", modern ? "error" : "ERROR"],
+    env: { ...transport.env, ...opencode.command("", undefined, version).env },
+  };
+}
+
+async function newOpenCodeSession(rpc: JsonRpc, cwd: string | undefined) {
+  await rpc.request("initialize", { protocolVersion: 1, clientCapabilities: {} });
+  const session = await rpc.request("session/new", { cwd, mcpServers: [] });
+  const sessionId = session.sessionId;
+  if (typeof sessionId !== "string") throw new Error("OpenCode did not start a session.");
+  return { sessionId, configOptions: session.configOptions };
+}
+
+export function parseEffort(value: unknown, provider: ProviderId): string | undefined {
+  if (value === undefined || value === "") return;
+  const valid = provider === "codex" ? /^(none|minimal|low|medium|high|xhigh|max|ultra)$/ : /^[a-z\d][a-z\d_-]{0,31}$/i;
+  if (typeof value !== "string" || !valid.test(value)) throw new Error("Choose a valid thinking level.");
+  return value;
+}
+
+export async function openCodeEfforts(transport: Transport, model: string, version?: string) {
+  let efforts: string[] = [];
+  await runJsonRpc(openCodeTransport(transport, version), { jsonrpc: true, onNotification() {} }, async (rpc) => {
+    const session = await newOpenCodeSession(rpc, transport.cwd);
+    const { configOptions } = model
+      ? await rpc.request("session/set_config_option", { sessionId: session.sessionId, configId: "model", value: model })
+      : session;
+    const option = Array.isArray(configOptions) && configOptions.map(asRecord).find((item) => item?.id === "effort");
+    const choices = option && option.options;
+    if (!Array.isArray(choices)) return;
+    efforts = choices.flatMap((choice) => {
+      const value = asRecord(choice)?.value;
+      return typeof value === "string" && value !== "default" && /^[a-z\d][a-z\d_-]{0,31}$/i.test(value) ? [value] : [];
+    });
+  });
+  return efforts;
+}
+
 function openCodeStream(
-  transport: Transport, prompt: string, model: string | undefined, version: string | undefined, publish: Publish,
+  transport: Transport, prompt: string, model: string | undefined, version: string | undefined, publish: Publish, effort?: string,
 ) {
   const modern = isOpenCodeV2(version);
-  const settings = opencode.command(prompt, model, version);
   const toolNames = new Map<string, string>();
   let reply = 0;
   let activeSession: string | undefined;
   let writing = false;
-  return runJsonRpc({
-    ...transport,
-    args: [...transport.args, "acp", ...(modern ? [] : ["--pure"]), "--log-level", modern ? "error" : "ERROR"],
-    env: { ...transport.env, ...settings.env },
-  }, {
+  return runJsonRpc(openCodeTransport(transport, version), {
     jsonrpc: true,
     onRequest(method) {
       if (method === "session/request_permission") return { outcome: { outcome: "cancelled" } };
@@ -117,15 +155,16 @@ function openCodeStream(
       }
     },
   }, async (rpc) => {
-    await rpc.request("initialize", { protocolVersion: 1, clientCapabilities: {} });
-    const session = await rpc.request("session/new", { cwd: transport.cwd, mcpServers: [] });
-    const sessionId = session.sessionId;
-    if (typeof sessionId !== "string") throw new Error("OpenCode did not start a session.");
+    const { sessionId } = await newOpenCodeSession(rpc, transport.cwd);
     activeSession = sessionId;
     await rpc.request("session/set_mode", { sessionId, modeId: modern ? "plan" : "honeycomb-review" });
     if (model) {
       if (modern) await rpc.request("session/set_config_option", { sessionId, configId: "model", value: model });
       else await rpc.request("session/set_model", { sessionId, modelId: model });
+    }
+    if (effort) {
+      if (!modern) throw new Error("Upgrade to OpenCode 2 to select a thinking level.");
+      await rpc.request("session/set_config_option", { sessionId, configId: "effort", value: effort });
     }
     const result = await rpc.request("session/prompt", { sessionId, prompt: [{ type: "text", text: prompt }] });
     if (!["end_turn", "max_tokens"].includes(String(result.stopReason))) {
@@ -138,8 +177,9 @@ function openCodeStream(
 
 export function streamProvider(
   provider: ProviderId, transport: Transport, prompt: string, model: string | undefined, version: string | undefined, publish: Publish,
+  effort?: string,
 ) {
   return provider === "codex"
-    ? codexStream(transport, prompt, model, publish)
-    : openCodeStream(transport, prompt, model, version, publish);
+    ? codexStream(transport, prompt, model, publish, effort)
+    : openCodeStream(transport, prompt, model, version, publish, effort);
 }

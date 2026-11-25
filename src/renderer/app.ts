@@ -20,6 +20,7 @@ const connectorButtons = document.querySelectorAll<HTMLButtonElement>("[data-con
 const promptField = get("prompt", HTMLTextAreaElement);
 const providerField = get("provider", HTMLSelectElement);
 const chatModelField = get("chat-model", HTMLSelectElement);
+const thinkingField = get("thinking-level", HTMLSelectElement);
 const connectorModelField = get("connector-model", HTMLSelectElement);
 const runButton = get("run-task", HTMLButtonElement);
 const chatStatus = get("chat-status");
@@ -60,6 +61,9 @@ let selectedConnectorId: ProviderId = "codex";
 let catalogOpen = false;
 const modelCatalogs: Partial<Record<ProviderId, ModelCatalog>> = {};
 const modelRequests: Partial<Record<ProviderId, Promise<void>>> = {};
+const effortChoices = new Map<string, string[]>();
+const effortRequests = new Set<string>();
+const selectedEfforts = new Map<string, string>();
 let pendingModel: ModelSelection | undefined;
 let connectorBusy = false;
 let choosing = false;
@@ -171,6 +175,7 @@ function renderComposerProvider() {
     void refreshModels(providerId);
   }
   renderModelPicker(chatModelField, providerId);
+  renderThinking(providerId);
   renderControls();
 }
 
@@ -464,6 +469,10 @@ function selectConnector(id: ProviderId) {
   if (!modelCatalogs[id] && !connectorBusy) void refreshModels(id);
 }
 
+function shortModelName(model: ModelCatalog["models"][number]) {
+  return (model.name === model.id ? model.id.split("/").pop() ?? model.id : model.name).replace(/\s+\([^)]*\)$/, "");
+}
+
 function renderModelPicker(select: HTMLSelectElement, providerId: ProviderId) {
   const catalog = modelCatalogs[providerId];
   const loading = Boolean(modelRequests[providerId]);
@@ -475,14 +484,15 @@ function renderModelPicker(select: HTMLSelectElement, providerId: ProviderId) {
   const online = element("optgroup");
   online.label = "Online catalog · may require setup";
   for (const model of catalog?.models ?? []) {
-    const option = element("option", "", model.name === model.id ? model.id : `${model.name} (${model.id})`);
+    const option = element("option", "", select === chatModelField ? shortModelName(model)
+      : model.name === model.id ? model.id : `${model.name} (${model.id})`);
     option.value = model.id;
     option.disabled = !model.available;
     (model.available ? local : online).append(option);
   }
   const selected = (pendingModel?.providerId === providerId ? pendingModel.model : catalog?.selected) ?? "";
   if (selected && !catalog?.models.some((model) => model.id === selected && model.available)) {
-    const saved = element("option", "", `${selected} (saved selection)`);
+    const saved = element("option", "", select === chatModelField ? selected.split("/").pop() : `${selected} (saved selection)`);
     saved.value = selected;
     local.append(saved);
   }
@@ -493,8 +503,57 @@ function renderModelPicker(select: HTMLSelectElement, providerId: ProviderId) {
   select.disabled = loading || connectorBusy || !catalog;
 }
 
+function effortLabel(value: string) {
+  if (value === "xhigh") return "Extra high";
+  if (!value) return "Default";
+  return value.charAt(0).toUpperCase() + value.slice(1).replace(/[_-]/g, " ");
+}
+
+function renderThinking(providerId: ProviderId) {
+  const modelId = chatModelField.value;
+  const key = providerId + ":" + modelId;
+  const catalog = modelCatalogs[providerId];
+  const model = catalog?.models.find((entry) => entry.id === modelId);
+  if (providerId === "opencode" && catalog && !effortChoices.has(key) && !effortRequests.has(key)) {
+    effortRequests.add(key);
+    void api.listOpenCodeEfforts(modelId).then(
+      (choices) => effortChoices.set(key, choices),
+      () => effortChoices.set(key, []),
+    ).finally(() => {
+      effortRequests.delete(key);
+      if (chatProviderId() === providerId && chatModelField.value === modelId) {
+        renderModelPicker(chatModelField, providerId);
+        renderThinking(providerId);
+      }
+    });
+  }
+  const choices = providerId === "codex" ? model?.efforts ?? [] : effortChoices.get(key) ?? [];
+  const saved = selectedEfforts.get(key) ?? "";
+  const selected = choices.includes(saved) ? saved : "";
+  const current = selected || model?.defaultEffort || "";
+  const defaultOption = element("option", "", "Thinking: default");
+  defaultOption.value = "";
+  const options = choices.map((value) => {
+    const option = element("option", "", effortLabel(value));
+    option.value = value;
+    return option;
+  });
+  thinkingField.replaceChildren(defaultOption, ...options);
+  thinkingField.value = selected;
+  thinkingField.disabled = !choices.length || chatModelField.disabled;
+  thinkingField.title = effortRequests.has(key) ? "Looking for thinking levels…"
+    : choices.length ? "Thinking level" : "This model uses its default thinking level";
+  const active = chatModelField.selectedOptions[0];
+  if (active && !chatModelField.disabled) {
+    const label = active.textContent ?? "";
+    const suffix = " · " + effortLabel(current);
+    active.textContent = (label.length > 22 ? label.slice(0, 21) + "…" : label) + suffix;
+  }
+}
+
 function renderModels() {
   renderModelPicker(chatModelField, chatProviderId());
+  renderThinking(chatProviderId());
   renderModelPicker(connectorModelField, selectedConnectorId);
   const catalog = modelCatalogs[selectedConnectorId];
   const loading = Boolean(modelRequests[selectedConnectorId]);
@@ -683,6 +742,10 @@ providerField.addEventListener("change", () => {
   actionError = "";
   renderComposerProvider();
 });
+thinkingField.addEventListener("change", () => {
+  selectedEfforts.set(chatProviderId() + ":" + chatModelField.value, thinkingField.value);
+  renderComposerProvider();
+});
 
 get("composer").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -693,7 +756,7 @@ get("composer").addEventListener("submit", async (event) => {
   actionError = "";
   renderControls();
   try {
-    selectedRunId = await api.startRun({ providerId: connector.id, prompt: draft });
+    selectedRunId = await api.startRun({ providerId: connector.id, prompt: draft, effort: thinkingField.value });
     if (promptField.value === draft) promptField.value = "";
   } catch (error) {
     showError(error);

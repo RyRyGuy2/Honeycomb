@@ -21,7 +21,14 @@ export function parseCodexCatalog(output: string): ModelCatalog["models"] {
     }
     if (!id || models.has(id)) continue;
     const title = model.display_name;
-    models.set(id, { id, name: typeof title === "string" && title.trim() ? title : id, available: true, online: false });
+    const levels = model.supported_reasoning_levels;
+    const efforts = Array.isArray(levels) ? levels.map((entry) => asRecord(entry)?.effort)
+      .filter((effort): effort is string => typeof effort === "string") : [];
+    const defaultEffort = typeof model.default_reasoning_level === "string" ? model.default_reasoning_level : undefined;
+    models.set(id, {
+      id, name: typeof title === "string" && title.trim() ? title : id, available: true, online: false,
+      ...(efforts.length ? { efforts } : {}), ...(defaultEffort ? { defaultEffort } : {}),
+    });
   }
   return [...models.values()];
 }

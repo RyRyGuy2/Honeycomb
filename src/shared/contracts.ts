@@ -12,7 +12,7 @@ export interface Connector {
 }
 
 export interface ModelCatalog {
-  models: Array<{ id: string; name: string; available: boolean; online: boolean }>;
+  models: Array<{ id: string; name: string; available: boolean; online: boolean; efforts?: string[]; defaultEffort?: string }>;
   selected: string;
   localError?: string;
   onlineError?: string;
@@ -66,6 +66,7 @@ export interface Run {
 export interface StartRunRequest {
   providerId: ProviderId;
   prompt: string;
+  effort?: string;
 }
 
 export interface AppState {
@@ -79,6 +80,7 @@ export interface IpcCalls {
   "inspect-providers": () => Connector[];
   "install-opencode": () => void;
   "list-models": (providerId: ProviderId) => ModelCatalog;
+  "list-opencode-efforts": (model: string) => string[];
   "set-model": (selection: ModelSelection) => void;
   "test-opencode": () => void;
   "choose-folder": () => ProjectFolder | undefined;
@@ -96,6 +98,7 @@ export interface HoneycombApi {
   inspectProviders: Invoke<"inspect-providers">;
   installOpenCode: Invoke<"install-opencode">;
   listModels: Invoke<"list-models">;
+  listOpenCodeEfforts: Invoke<"list-opencode-efforts">;
   setModel: Invoke<"set-model">;
   listOpenCodeModels(): Promise<ModelCatalog>;
   setOpenCodeModel(model: string): Promise<void>;

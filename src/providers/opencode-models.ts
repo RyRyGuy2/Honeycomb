@@ -6,6 +6,7 @@ import type { ModelCatalog } from "../shared/contracts.js";
 import { asRecord } from "../shared/records.js";
 import { checkProvider, providerEnvironment } from "./index.js";
 import { isOpenCodeV2, opencode, parseOpenCodeModel } from "./opencode.js";
+import { openCodeEfforts } from "./stream.js";
 
 const CATALOGS = ["https://opencode.ai/zen/v1/models", "https://opencode.ai/inference/v1/models"];
 
@@ -46,14 +47,27 @@ async function listLocalModels(managedPath: string | undefined, signal?: AbortSi
 
   const result = await runProcess({
     file: executable.file,
-    args: [...executable.args, "models", ...(isOpenCodeV2(connector.version) ? [] : ["--pure"])],
-    env: { ...providerEnvironment(opencode), ...opencode.command("").env },
+    args: [...executable.args, "models", ...(isOpenCodeV2(connector.version) ? ["--standalone"] : ["--pure"])],
+    env: { ...providerEnvironment(opencode), ...opencode.command("", undefined, connector.version).env },
     timeoutMs: 20_000,
     outputLimit: 256 * 1024,
     signal,
   });
   if (result.code !== 0) throw new Error("OpenCode couldn't list its configured models. Check its model setup and try again.");
   return result.output;
+}
+
+export async function listOpenCodeEfforts(managedPath: string | undefined, model: string, signal: AbortSignal) {
+  const { connector, executable } = await checkProvider(opencode, signal, managedPath);
+  if (!executable || !isOpenCodeV2(connector.version)) return [];
+  const directory = await mkdtemp(join(tmpdir(), "honeycomb-opencode-models-"));
+  try {
+    return await openCodeEfforts({
+      ...executable, cwd: directory, env: providerEnvironment(opencode), timeoutMs: 15_000, signal,
+    }, model, connector.version);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 }
 
 async function listOnlineModels(signal?: AbortSignal) {
@@ -86,7 +100,7 @@ export async function testOpenCode(managedPath: string | undefined, model: strin
   if (!executable) throw new Error(connector.detail || "Install OpenCode to test the connector.");
   const directory = await mkdtemp(join(tmpdir(), "honeycomb-opencode-test-"));
   try {
-    const command = opencode.command("Reply with OK. No tools are needed.", model);
+    const command = opencode.command("Reply with OK. No tools are needed.", model, connector.version);
     let response = false;
     let completed = false;
     let failure: string | undefined;
