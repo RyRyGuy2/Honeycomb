@@ -502,6 +502,11 @@ main { grid-column: 3; }
   font-weight: 700;
 }
 .connector-monogram.opencode { color: var(--text); background: var(--control); border-color: var(--border); }
+.connector-monogram.claude {
+  color: #E8936A;
+  background: color-mix(in srgb, #E8936A 12%, var(--surface));
+  border-color: color-mix(in srgb, #E8936A 48%, var(--border));
+}
 .connector-heading .connector-monogram { width: 46px; height: 46px; margin-top: 4px; font-size: 20px; }
 .connector-card { padding: 18px 20px; }
 .connector-card > .button { margin-top: 18px; }

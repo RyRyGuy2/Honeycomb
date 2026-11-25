@@ -1,4 +1,4 @@
-export type ProviderId = "codex" | "opencode";
+export type ProviderId = "codex" | "opencode" | "claude";
 export type WorkspaceMode = "code" | "chat";
 export type ConnectorStatus = "checking" | "detected" | "missing" | "unavailable";
 
@@ -15,6 +15,7 @@ export interface Connector {
 export interface ModelCatalog {
   models: Array<{ id: string; name: string; available: boolean; online: boolean; efforts?: string[]; defaultEffort?: string }>;
   selected: string;
+  defaultEfforts?: string[];
   localError?: string;
   onlineError?: string;
 }

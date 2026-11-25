@@ -42,6 +42,12 @@ const connectorLabels = {
 const connectorDescriptions = {
   codex: "Uses the Codex CLI’s read-only sandbox.",
   opencode: "Uses OpenCode’s agent permissions to read and search the project.",
+  claude: "Uses Claude Code with read and search tools only, no MCP servers, and no project settings.",
+} satisfies Record<ProviderId, string>;
+const providerNames = {
+  codex: "Codex",
+  opencode: "OpenCode",
+  claude: "Claude Code",
 } satisfies Record<ProviderId, string>;
 const usageLabels = [
   ["inputTokens", "Input tokens"],
@@ -80,6 +86,7 @@ let lastThreadId: string | undefined;
 let connectors: Connector[] = [
   { id: "codex", name: "Codex", status: "checking" },
   { id: "opencode", name: "OpenCode", status: "checking" },
+  { id: "claude", name: "Claude Code", status: "checking" },
 ];
 const runs = new Map<string, Run>();
 const openToolGroups = new Set<string>();
@@ -177,7 +184,8 @@ function renderControls() {
 }
 
 function chatProviderId(): ProviderId {
-  return providerField.value === "opencode" ? "opencode" : "codex";
+  const value = providerField.value;
+  return value === "opencode" || value === "claude" ? value : "codex";
 }
 
 function renderComposerProvider() {
@@ -405,7 +413,7 @@ function renderWorkspaceMode() {
   get("choose-folder").hidden = chat;
   get("history-title").textContent = chat ? "Recent chats" : "Projects";
   get("welcome-title").textContent = chat ? "Ask a question" : "Start a review run";
-  get("welcome-description").textContent = chat ? "Choose a model and start a conversation." : "Choose a project and ask Codex or OpenCode to investigate.";
+  get("welcome-description").textContent = chat ? "Choose a model and start a conversation." : "Choose a project and ask Codex, OpenCode or Claude Code to investigate.";
   get("prompt-ideas").hidden = chat;
   get("send-label").textContent = chat ? "Send" : "Run task";
   promptField.placeholder = chat ? "Ask a question…" : "Ask about your project…";
@@ -454,6 +462,7 @@ function renderConnectors() {
   const mark = get("connector-mark");
   mark.textContent = connector.name.charAt(0);
   mark.classList.toggle("opencode", connector.id === "opencode");
+  mark.classList.toggle("claude", connector.id === "claude");
   get("connector-title").textContent = connector.name;
   get("connector-description").textContent = connectorDescriptions[connector.id];
   get("connector-status").replaceChildren(statusDot(connector.status), connectorLabels[connector.status]);
@@ -535,7 +544,7 @@ function renderModelPicker(select: HTMLSelectElement, providerId: ProviderId) {
   const codexChat = select === chatModelField && mode === "chat" && providerId === "codex";
   const catalog = modelCatalogs[providerId];
   const loading = Boolean(modelRequests[providerId]);
-  const providerName = providerId === "codex" ? "Codex" : "OpenCode";
+  const providerName = providerNames[providerId];
   const fallback = element("option", "", loading && !catalog ? "Loading models…" : `${providerName} default`);
   fallback.value = "";
   const local = element("optgroup");
@@ -587,7 +596,7 @@ function renderThinking(providerId: ProviderId) {
       }
     });
   }
-  const choices = providerId === "codex" ? model?.efforts ?? [] : effortChoices.get(key) ?? [];
+  const choices = providerId !== "opencode" ? model?.efforts ?? catalog?.defaultEfforts ?? [] : effortChoices.get(key) ?? [];
   const saved = selectedEfforts.get(key) ?? "";
   const selected = choices.includes(saved) ? saved : "";
   const current = selected || model?.defaultEffort || "";
