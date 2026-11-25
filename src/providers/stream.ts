@@ -90,7 +90,9 @@ async function newOpenCodeSession(rpc: JsonRpc, cwd: string | undefined) {
 
 export function parseEffort(value: unknown, provider: ProviderId): string | undefined {
   if (value === undefined || value === "") return;
-  const valid = provider === "codex" ? /^(none|minimal|low|medium|high|xhigh|max|ultra)$/ : /^[a-z\d][a-z\d_-]{0,31}$/i;
+  const valid = provider === "codex" ? /^(none|minimal|low|medium|high|xhigh|max|ultra)$/
+    : provider === "claude" ? /^(low|medium|high|xhigh|max)$/
+    : /^[a-z\d][a-z\d_-]{0,31}$/i;
   if (typeof value !== "string" || !valid.test(value)) throw new Error("Choose a valid thinking level.");
   return value;
 }
