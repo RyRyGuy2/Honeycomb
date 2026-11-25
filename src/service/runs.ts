@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { checkProvider, providerEnvironment, providers } from "../providers/index.js";
+import { streamProvider } from "../providers/stream.js";
 import type { ProviderAdapter, ProviderUsageEvent } from "../providers/types.js";
 import type { FinishedRunStatus, ProjectFolder, ProviderId, Run, RunEventData, RunUsage } from "../shared/contracts.js";
 import { asRecord } from "../shared/records.js";
-import { readJsonLines, runProcess } from "./process.js";
 
 const MAX_PROMPT_LENGTH = 8_000;
 const MAX_MESSAGE_LENGTH = 16_000;
@@ -29,13 +29,6 @@ function usageFrom(event: ProviderUsageEvent): RunUsage {
     if (typeof value === "number" && Number.isFinite(value) && value >= 0) usage[key] = value;
   }
   return usage;
-}
-
-function trackUsage(run: Run, usage: RunUsage) {
-  for (const key of USAGE_KEYS) {
-    const value = usage[key];
-    if (value !== undefined) run.usage[key] = (run.usage[key] ?? 0) + value;
-  }
 }
 
 function failureText(value: unknown, env: NodeJS.ProcessEnv) {
@@ -70,72 +63,64 @@ export function createRunService(
 
   async function execute(run: Run, provider: ProviderAdapter, signal: AbortSignal) {
     const env = providerEnvironment(provider);
-    let finalError: string | undefined;
-    let diagnostic: string | undefined;
     let providerNotice: string | undefined;
-    let completed = false;
-    const stdout = readJsonLines((line) => {
-      const update = provider.decode(line);
-      if (!update || signal.aborted) return;
-
-      finalError = update.failed ?? finalError;
-      diagnostic = update.diagnostic ?? diagnostic;
-      completed ||= Boolean(update.completed);
-      if (!update.event) return;
-
-      const { type } = update.event;
-      if (type === "usage") {
-        const usage = usageFrom(update.event);
-        if (Object.keys(usage).length) {
-          trackUsage(run, usage);
-          append(run, { type, ...usage });
-        }
-        return;
-      }
-      const text = displayText(update.event.text, MAX_MESSAGE_LENGTH);
-      if (text) append(run, { type, text });
-    });
-
+    const replies = new Map<string, Extract<Run["events"][number], { text: string }>>();
+    let pendingUpdate: ReturnType<typeof setTimeout> | undefined;
     try {
       const options = optionsForProvider(provider.id);
       const { connector, executable } = await checkProvider(provider, signal, options.executable);
       if (signal.aborted) return finish(run, "cancelled", "Run stopped.");
-      if (!executable) {
-        throw new Error(connector.detail ?? `${provider.name} was not found on PATH.`);
-      }
+      if (!executable) throw new Error(connector.detail ?? provider.name + " was not found on PATH.");
 
-      const command = provider.command(run.prompt, options.model, connector.version);
-      const result = await runProcess({
-        file: executable.file,
-        args: [...executable.args, ...command.args],
-        cwd: run.folder.path,
-        env: { ...env, ...command.env },
-        input: command.input,
-        timeoutMs: TIMEOUT_MS,
-        signal,
-        stdout,
+      await streamProvider(provider.id, {
+        ...executable, cwd: run.folder.path, env, timeoutMs: TIMEOUT_MS, signal,
         onStderr(tail) {
           if (providerNotice || signal.aborted) return;
           providerNotice = provider.diagnoseStderr?.(tail);
           if (providerNotice) append(run, { type: "notice", text: providerNotice });
         },
+      }, run.prompt, options.model, connector.version, (event) => {
+        if (signal.aborted) return;
+        if (event.type === "usage") {
+          const usage = usageFrom(event);
+          if (Object.keys(usage).length) {
+            Object.assign(run.usage, usage);
+            append(run, { type: "usage", ...usage });
+          }
+        } else if ("id" in event) {
+          const existing = replies.get(event.id);
+          const text = event.text.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "");
+          if (!text) return;
+          const value = (event.type === "delta" ? (existing?.text ?? "") + text : text).slice(0, 1_000_000);
+          if (existing) {
+            if (existing.text === value) return;
+            existing.text = value;
+            run.revision++;
+          } else {
+            const message = {
+              type: "message" as const, text: value, runId: run.id, sequence: ++run.revision, at: new Date().toISOString(),
+            };
+            replies.set(event.id, message);
+            run.events.push(message);
+          }
+          pendingUpdate ??= setTimeout(() => {
+            pendingUpdate = undefined;
+            publish(run);
+          }, 40);
+        } else {
+          const text = displayText(event.text, MAX_MESSAGE_LENGTH);
+          if (text) append(run, { type: event.type, text });
+        }
       });
-
-      if (result.stopped === "cancelled") return finish(run, "cancelled", "Run stopped.");
-      if (finalError) throw new Error(finalError);
-      if (result.stopped === "timeout") throw new Error(providerNotice || "The run reached its five-minute limit.");
-      if (result.error) throw new Error(result.error);
-      if (result.code !== 0) {
-        throw new Error(providerNotice || diagnostic || result.stderr || `${provider.name} exited without completing the run.`);
-      }
-      if (!completed) {
-        throw new Error(providerNotice || diagnostic || result.stderr || `${provider.name} exited without a completion event.`);
-      }
+      if (signal.aborted) return finish(run, "cancelled", "Run stopped.");
       finish(run, "completed", "Run completed.");
     } catch (error) {
+      if (signal.aborted) return finish(run, "cancelled", "Run stopped.");
       const message = error instanceof Error ? error.message : error;
-      append(run, { type: "error", text: failureText(message, env) || "The provider could not complete the run." });
+      append(run, { type: "error", text: failureText(providerNotice ?? message, env) || "The provider could not complete the run." });
       finish(run, "failed", "Run failed.");
+    } finally {
+      clearTimeout(pendingUpdate);
     }
   }
 

@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
+import type { Writable } from "node:stream";
 import { join } from "node:path";
 import { asRecord } from "../shared/records.js";
 
@@ -18,6 +19,7 @@ interface ProcessOptions {
   cwd?: string;
   env: NodeJS.ProcessEnv;
   input?: string;
+  startInput?: (input: Writable) => void;
   timeoutMs: number;
   signal?: AbortSignal;
   stdout?: StdoutReader;
@@ -99,7 +101,7 @@ function terminateTree(child: ChildProcess) {
 }
 
 export function runProcess({
-  file, args, cwd, env, input = "", timeoutMs, signal, stdout, onStderr, outputLimit = MAX_DIAGNOSTIC_LENGTH,
+  file, args, cwd, env, input = "", startInput, timeoutMs, signal, stdout, onStderr, outputLimit = MAX_DIAGNOSTIC_LENGTH,
 }: ProcessOptions): Promise<ProcessResult> {
   if (signal?.aborted) {
     return Promise.resolve({ code: null, output: "", stderr: "", stopped: "cancelled" });
@@ -147,6 +149,7 @@ export function runProcess({
       stdout?.end();
       resolve({ code, output, stderr, stopped, error });
     });
-    child.stdin.end(input);
+    if (startInput) startInput(child.stdin);
+    else child.stdin.end(input);
   });
 }

@@ -197,7 +197,7 @@ function historyButton(run: Run, select: () => void) {
   if (run.id === selectedRunId) button.setAttribute("aria-current", "true");
   button.append(
     element("span", "history-name", run.prompt.replace(/\s+/g, " ")),
-    element("span", "history-meta", `${run.providerName} · ${statusLabels[run.status]}`),
+    element("span", "history-meta", `${run.providerName} Â· ${statusLabels[run.status]}`),
   );
   button.addEventListener("click", select);
   return button;
@@ -704,7 +704,15 @@ get("composer").addEventListener("submit", async (event) => {
 });
 
 api.onRunChanged((run) => {
+  const previous = runs.get(run.id);
   remember(run);
+  if (previous?.status === run.status) {
+    if (selectedRunId === run.id && previous.revision < run.revision) {
+      renderThread(run);
+      renderDetails(run);
+    }
+    return;
+  }
   if (run.revision === 1 && run.folder.path === folder?.path) selectedRunId = run.id;
   renderChats();
 });
