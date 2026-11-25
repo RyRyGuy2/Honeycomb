@@ -37,10 +37,10 @@ function usageFrom(event: ProviderUsageEvent): RunUsage {
   return usage;
 }
 
-function failureText(value: unknown, env: NodeJS.ProcessEnv) {
+function failureText(value: unknown, env: NodeJS.ProcessEnv, secrets: readonly string[] = []) {
   if (typeof value !== "string") return "";
   let text = value.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
-  for (const key of ["CODEX_API_KEY", "OPENAI_API_KEY"]) {
+  for (const key of ["CODEX_API_KEY", "OPENAI_API_KEY", ...secrets]) {
     const secret = env[key];
     if (secret) text = text.replaceAll(secret, "[redacted]");
   }
@@ -134,7 +134,7 @@ export function createRunService(
     } catch (error) {
       if (signal.aborted) return finish(run, "cancelled", "Run stopped.");
       const message = error instanceof Error ? error.message : error;
-      append(run, { type: "error", text: failureText(providerNotice ?? message, env) || "The provider could not complete the run." });
+      append(run, { type: "error", text: failureText(providerNotice ?? message, env, provider.secretEnvironment) || "The provider could not complete the run." });
       finish(run, "failed", "Run failed.");
     } finally {
       clearTimeout(pendingUpdate);
@@ -168,7 +168,7 @@ export function createRunService(
       if (mode === "code" && !folder) throw new Error("Choose a project folder first.");
       const providerId = payload?.providerId;
       const provider = typeof providerId === "string" ? providers.get(providerId) : undefined;
-      if (!provider) throw new Error("Choose Codex or OpenCode.");
+      if (!provider) throw new Error("Choose Codex, OpenCode or Claude Code.");
       const effort = parseEffort(payload?.effort, provider.id);
       const chatModel = mode === "chat" && provider.id === "codex" ? parseCodexModel(payload?.model ?? "") : undefined;
       const prompt = typeof payload?.prompt === "string" ? payload.prompt.trim() : "";

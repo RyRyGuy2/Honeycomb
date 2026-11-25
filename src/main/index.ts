@@ -2,10 +2,11 @@ import { app, BrowserWindow, dialog, ipcMain, nativeTheme, protocol, session, sh
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { claude, claudeModelCatalog, parseClaudeModel } from "../providers/claude.js";
 import { listCodexChatModels } from "../providers/codex-chat.js";
 import { listCodexModels } from "../providers/codex-models.js";
 import { parseCodexModel } from "../providers/codex.js";
-import { inspectProviders, providerEnvironment } from "../providers/index.js";
+import { checkProvider, inspectProviders, providerEnvironment } from "../providers/index.js";
 import { installOpenCodeRelease, managedOpenCodePath, openCodeRelease } from "../providers/opencode-install.js";
 import { listOpenCodeEfforts, listOpenCodeModels, testOpenCode } from "../providers/opencode-models.js";
 import { opencode, parseOpenCodeModel } from "../providers/opencode.js";
@@ -36,8 +37,9 @@ let folder: ProjectFolder | undefined;
 let projects: ProjectFolder[] = [];
 let mode: WorkspaceMode = "code";
 let quitting = false;
-const selectedModels: Record<ProviderId, string> = { codex: "", opencode: "" };
-const modelParsers = { codex: parseCodexModel, opencode: parseOpenCodeModel };
+const PROVIDER_IDS = ["codex", "opencode", "claude"] as const satisfies readonly ProviderId[];
+const selectedModels: Record<ProviderId, string> = { codex: "", opencode: "", claude: "" };
+const modelParsers = { codex: parseCodexModel, opencode: parseOpenCodeModel, claude: parseClaudeModel };
 let downloading: Promise<void> | undefined;
 const connectorAbort = new AbortController();
 const connectorJobs = new Set<Promise<unknown>>();
@@ -57,8 +59,15 @@ function workspaceState() {
 }
 
 function requireProviderId(value: unknown): ProviderId {
-  if (value === "codex" || value === "opencode") return value;
-  throw new Error("Choose Codex or OpenCode.");
+  const id = PROVIDER_IDS.find((providerId) => providerId === value);
+  if (id) return id;
+  throw new Error("Choose Codex, OpenCode or Claude Code.");
+}
+
+async function listClaudeModels(signal: AbortSignal) {
+  const { connector, executable } = await checkProvider(claude, signal);
+  const catalog = claudeModelCatalog(selectedModels.claude);
+  return executable ? catalog : { ...catalog, localError: connector.detail || "Install Claude Code to use its models." };
 }
 
 function trackConnectorJob<T>(job: Promise<T>) {
@@ -137,6 +146,7 @@ function registerHandlers() {
   handle("list-models", (value) => {
     const providerId = requireProviderId(value);
     const signal = connectorAbort.signal;
+    if (providerId === "claude") return trackConnectorJob(listClaudeModels(signal));
     return trackConnectorJob(providerId === "codex"
       ? listCodexModels(selectedModels.codex, signal)
       : listOpenCodeModels(getOpenCodePath(), selectedModels.opencode, signal));
@@ -237,7 +247,7 @@ app.whenReady().then(async () => {
     runs.restore(saved.runs);
     if (saved.mode === "chat") mode = "chat";
   }
-  await Promise.all((["codex", "opencode"] as const).map(async (providerId) => {
+  await Promise.all(PROVIDER_IDS.map(async (providerId) => {
     try {
       selectedModels[providerId] = modelParsers[providerId](await readFile(modelFile(providerId), "utf8"));
     } catch {

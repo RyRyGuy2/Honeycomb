@@ -3,6 +3,7 @@ import { access, stat } from "node:fs/promises";
 import { delimiter, isAbsolute, join } from "node:path";
 import { runProcess } from "../service/process.js";
 import type { Connector } from "../shared/contracts.js";
+import { claude } from "./claude.js";
 import { codex } from "./codex.js";
 import { opencode } from "./opencode.js";
 import type { ProviderAdapter } from "./types.js";
@@ -10,6 +11,7 @@ import type { ProviderAdapter } from "./types.js";
 export const providers = new Map<string, ProviderAdapter>([
   [codex.id, codex],
   [opencode.id, opencode],
+  [claude.id, claude],
 ]);
 
 interface Executable {
@@ -115,6 +117,20 @@ export async function checkProvider(provider: ProviderAdapter, signal?: AbortSig
     const detail = provider.versionIssue?.(version);
     if (detail) {
       return { connector: { ...detected, status: "unavailable", detail } };
+    }
+    if (provider.requiredHelpFlags?.length) {
+      const help = await runProcess({
+        file: executable.file,
+        args: [...executable.args, "--help"],
+        env: { ...providerEnvironment(), ...provider.probeEnvironment },
+        timeoutMs: 8_000,
+        outputLimit: 256 * 1024,
+        signal,
+      });
+      if (help.code !== 0 || provider.requiredHelpFlags.some((flag) => !help.output.includes(flag))) {
+        const issue = provider.helpIssue ?? `This ${provider.name} CLI is missing options Honeycomb needs.`;
+        return { connector: { ...detected, status: "unavailable", detail: issue } };
+      }
     }
     return { connector: detected, executable };
   } catch (error) {

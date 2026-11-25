@@ -4,7 +4,7 @@ Honeycomb begins as a local Electron app for directing coding agents. Codex and 
 
 ## Scope and design source
 
-The project request sets the desktop platform and the initial pair of connectors. The *Honeycomb Design Doc* supplies the architecture, the Chats, Workflows, and Connectors layout, the event model, and the Git review workflow. Its Claude Code example and provider sequence are future product ideas, subject to the owner's choices. Claude Code and Gemini CLI can be reconsidered when the owner has access and wants to add them.
+The project request sets the desktop platform and the initial pair of connectors. The *Honeycomb Design Doc* supplies the architecture, the Chats, Workflows, and Connectors layout, the event model, and the Git review workflow. Its Claude Code example and provider sequence are future product ideas, subject to the owner's choices. Claude Code is now a review connector. Gemini CLI can be reconsidered when the owner has access and wants to add it.
 
 ## 0. Desktop scaffold and review runs
 
@@ -13,6 +13,7 @@ The project request sets the desktop platform and the initial pair of connectors
 | Connector | First integration | Permission scope |
 | --- | --- | --- |
 | Codex | `codex exec --json` with the prompt on standard input and saved CLI authentication. [Codex non-interactive mode](https://developers.openai.com/codex/noninteractive) | Codex read-only sandbox and no interactive approvals |
+| Claude Code | `claude -p --output-format stream-json --verbose` with the prompt on standard input and saved CLI sign-in. [Claude Code headless mode](https://docs.claude.com/en/docs/claude-code/headless) | Read, Grep, Glob and LS allowed; shell, edit, web and `.env` reads denied; `--setting-sources user` and `--strict-mcp-config` keep project settings, hooks and MCP servers out |
 | OpenCode | OpenCode 1.x `run --format json` with a review agent supplied for the process. The CLI session runs inside its own process. [OpenCode v1 CLI source](https://github.com/anomalyco/opencode/blob/v1.14.20/packages/opencode/src/cli/cmd/run.ts) | OpenCode tool permissions allow project reads and searches |
 
 Run history lives in memory. The app reports provider-supplied token counts and cost when available. An executable check confirms installation. A live run uses the CLI's authentication and default model selection. The task time limit is five minutes.
