@@ -5,11 +5,11 @@ import { join } from "node:path";
 import { streamClaude } from "../providers/claude.js";
 import { parseCodexModel } from "../providers/codex.js";
 import { checkProvider, providerEnvironment, providers } from "../providers/index.js";
-import { parseEffort, streamCodexChat, streamCodexEdit, streamOpenCodeChat, streamProvider } from "../providers/stream.js";
+import { parseEffort, streamCodexChat, streamCodexEdit, streamOpenCodeChat, streamOpenCodeEdit, streamProvider } from "../providers/stream.js";
 import type { StreamEvent } from "../providers/stream.js";
 import type { ProviderAdapter, ProviderUsageEvent } from "../providers/types.js";
 import type {
-  FinishedRunStatus, ProjectFolder, ProviderId, Run, RunEventData, RunUsage, WorktreeState,
+  FinishedRunStatus, FreebuffContext, ProjectFolder, ProviderId, Run, RunEventData, RunUsage, WorktreeState,
 } from "../shared/contracts.js";
 import { compareTurns, conversationContext, conversationId, followUpPrompt, runMode } from "../shared/conversations.js";
 import { supportsWorktreeEditing } from "../shared/editing.js";
@@ -191,6 +191,9 @@ export function createRunService(
       } else if (provider.id === "codex" && run.edit) {
         if (!worktreePath) throw new Error("Codex editing requires a Git worktree.");
         await streamCodexEdit({ ...transport, cwd: worktreePath }, prompt, options.model, receive, effort);
+      } else if (provider.id === "opencode" && run.edit) {
+        if (!worktreePath) throw new Error("OpenCode editing requires a Git worktree.");
+        await streamOpenCodeEdit({ ...transport, cwd: worktreePath }, prompt, options.model, connector.version, receive, effort);
       } else if (provider.id === "claude") {
         await streamClaude(transport, prompt, {
           model: options.model, effort, chat: run.mode === "chat", edit: run.edit === true,
@@ -256,7 +259,7 @@ export function createRunService(
       await save();
       throw new Error("Could not save chat history. The chat was kept.");
     },
-    start(folder: ProjectFolder | undefined, request: unknown) {
+    start(folder: ProjectFolder | undefined, request: unknown, attachedFreebuff?: FreebuffContext) {
       if (closing) throw new Error("Honeycomb is closing.");
       if (active) throw new Error("Stop or finish the active run before starting another.");
       const payload = asRecord(request);
@@ -278,7 +281,7 @@ export function createRunService(
       if (thread !== undefined && typeof thread !== "string") throw new Error("Invalid chat.");
       if (edit && mode !== "code") throw new Error("Switch to Code to edit in a Git worktree.");
       if (edit && !supportsWorktreeEditing(provider.id)) {
-        throw new Error("Choose Codex or Claude Code to edit in a Git worktree.");
+        throw new Error("Choose Codex, OpenCode or Claude Code to edit in a Git worktree.");
       }
       const turns = thread === undefined ? [] : conversation(thread);
       const first = turns[0];
@@ -288,11 +291,15 @@ export function createRunService(
       }
       if (first && turns.some((turn) => turn.providerId !== provider.id)) throw new Error(`Continue this chat with ${first.providerName}.`);
       const context = first ? conversationContext(turns) : undefined;
+      const freebuffContext = attachedFreebuff ?? turns.reduce<FreebuffContext | undefined>(
+        (latest, turn) => turn.freebuffContext ?? latest, undefined,
+      );
       // Follow-up edits continue in the worktree this chat already opened, if it still exists.
       const worktree = edit ? turns.find((turn) => turn.worktree && turn.worktree.state !== "discarded")?.worktree : undefined;
       const run: Run = {
         id: randomUUID(),
         ...(thread === undefined ? {} : { conversationId: thread, turnIndex: turns.length, context: context?.summary }),
+        ...(attachedFreebuff ? { freebuffContext: attachedFreebuff } : {}),
         providerId: provider.id,
         providerName: provider.name,
         mode,
@@ -310,7 +317,8 @@ export function createRunService(
       history.unshift(run);
       active = { run, controller };
       append(run, { type: "started", text: `Starting ${provider.name}.` });
-      active.done = execute(run, provider, context?.summary.includedTurns ? followUpPrompt(prompt, context.transcript) : prompt,
+      const previousTurns = context?.summary.includedTurns ? context.transcript : undefined;
+      active.done = execute(run, provider, followUpPrompt(prompt, previousTurns, freebuffContext),
         controller.signal, effort, chatModel);
       return run.id;
     },

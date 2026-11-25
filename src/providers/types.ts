@@ -33,7 +33,7 @@ export interface ProviderAdapter {
   helpIssue?: string;
   parseVersion(output: string): string | undefined;
   versionIssue?(version: string): string | undefined;
-  command(prompt: string, model?: string, version?: string): ProviderCommand;
+  command(prompt: string, model?: string, version?: string, mode?: "review" | "edit"): ProviderCommand;
   decode(event: Record<string, unknown>): ProviderUpdate | undefined;
   diagnoseStderr?(stderr: string): string | undefined;
 }

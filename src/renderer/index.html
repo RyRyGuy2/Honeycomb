@@ -118,6 +118,7 @@
             </div>
           </div>
           <div id="feed" class="feed" hidden></div>
+          <div id="freebuff-handoffs" class="feed" hidden></div>
         </div>
 
         <div class="composer-area">
@@ -132,6 +133,8 @@
             <textarea id="prompt" rows="3" maxlength="8000" aria-describedby="composer-context" placeholder="Ask about your project…"></textarea>
             <p id="composer-context" class="composer-context">
               <span id="composer-context-status" title="Earlier prompts, replies, and recorded tool calls may be included in the next message."></span>
+              <span id="composer-freebuff-status" hidden></span>
+              <button id="remove-freebuff-context" type="button" hidden>Remove Freebuff attachment</button>
             </p>
             <div class="composer-actions">
               <div class="composer-options">
@@ -147,6 +150,7 @@
                   <option value="codex">Codex</option>
                   <option value="opencode">OpenCode</option>
                   <option value="claude">Claude Code</option>
+                  <option value="freebuff" id="freebuff-provider" hidden>Freebuff</option>
                 </select>
                 <span id="chat-model-control">
                   <label class="visually-hidden" for="chat-model">Model</label>
@@ -223,6 +227,7 @@
           </div>
         </dl>
         <p id="connector-detail-note" class="connector-note" hidden></p>
+        <div id="connector-install"></div>
         <button type="button" id="use-connector" class="button button-primary" disabled>Use Codex</button>
         <div class="connector-model-settings">
           <div class="model-field">

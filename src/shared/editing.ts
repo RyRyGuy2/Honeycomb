@@ -1,5 +1,5 @@
 export function supportsWorktreeEditing(provider: unknown) {
-  return provider === "codex" || provider === "claude";
+  return provider === "codex" || provider === "opencode" || provider === "claude";
 }
 
 /** Only branches with this prefix were created by Honeycomb, and only they may be deleted. */

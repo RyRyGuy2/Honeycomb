@@ -12,6 +12,7 @@ function invoke<Channel extends keyof IpcCalls>(
 }
 
 const api: HoneycombApi = {
+  copyInstallCommand: (command) => invoke("copy-install-command", command),
   getState: () => invoke("state"),
   inspectProviders: () => invoke("inspect-providers"),
   installOpenCode: () => invoke("install-opencode"),
@@ -28,6 +29,9 @@ const api: HoneycombApi = {
   openReplyLink: (url) => invoke("open-reply-link", url),
   stopRun: (runId) => invoke("stop-run", runId),
   keepWorktree: (worktreeId) => invoke("keep-worktree", worktreeId),
+  openFreebuff: (request) => invoke("open-freebuff", request),
+  reviewFreebuff: (id) => invoke("review-freebuff", id),
+  copyFreebuffExport: () => invoke("copy-freebuff-export"),
   discardWorktree: (worktreeId) => invoke("discard-worktree", worktreeId),
   showSidebarMenu: (request) => invoke("sidebar-menu", request),
   onRunChanged(callback) {

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, protocol, session, shell } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme, protocol, session, shell } from "electron";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,10 +10,11 @@ import { installOpenCodeRelease, managedOpenCodePath, openCodeRelease } from "..
 import { listOpenCodeEfforts, listOpenCodeModels, testOpenCode } from "../providers/opencode-models.js";
 import { opencode, parseOpenCodeModel } from "../providers/opencode.js";
 import { runProcess } from "../service/process.js";
+import { FREEBUFF_EXPORT_PATTERN, findFreebuffTerminal, findFreebuffTranscript, openFreebuffTerminal, readFreebuffTranscript, readSavedFreebuffExchange } from "../service/freebuff.js";
 import { createRunService } from "../service/runs.js";
 import { createWorkspaceStore } from "../service/workspace.js";
 import { createWorktreeManager } from "../service/worktree.js";
-import type { IpcCalls, ProjectFolder, ProviderId, WorkspaceMode } from "../shared/contracts.js";
+import type { FreebuffContext, IpcCalls, ProjectFolder, ProviderId, WorkspaceMode } from "../shared/contracts.js";
 import { supportsWorktreeEditing } from "../shared/editing.js";
 import { asRecord } from "../shared/records.js";
 
@@ -161,6 +162,62 @@ function handle<Channel extends keyof IpcCalls>(
 
 function registerHandlers() {
   handle("state", workspaceState);
+  handle("copy-install-command", (command) => {
+    if (typeof command !== "string" || !/^npm install -g [@a-z0-9/-]+$/.test(command) || command.length > 100) {
+      throw new Error("Invalid CLI install command.");
+    }
+    clipboard.writeText(command);
+  });
+  let openingFreebuff = false;
+  handle("open-freebuff", async (request) => {
+    const { prompt, id, replace } = asRecord(request) ?? {};
+    const project = folder;
+    if (mode !== "code" || !project) throw new Error("Choose a project in Code first.");
+    if (id !== undefined && (typeof id !== "string" || !id)) throw new Error("Invalid Freebuff worktree.");
+    if (typeof prompt !== "string" || prompt.length > 8000 || prompt.includes("\0") || (!id && !prompt.trim())) {
+      throw new Error("Enter a prompt to copy to Freebuff.");
+    }
+    if (openingFreebuff) throw new Error("A Freebuff handoff is already opening.");
+    openingFreebuff = true;
+    try {
+      const target = await findFreebuffTerminal();
+      if (mode !== "code" || folder?.path !== project.path) throw new Error("The selected project changed. Try again.");
+      let record = typeof id === "string" ? worktrees.find(id) : undefined;
+      if (id && (!record || record.freebuffProject !== project.path || record.state === "discarded")) {
+        throw new Error("This Freebuff worktree is no longer available.");
+      }
+      if (record && !(await worktrees.exists(record))) {
+        if (replace !== true) throw new Error("This Freebuff folder is no longer a Git worktree. Create a replacement from its card.");
+        record = undefined;
+      }
+      const resume = Boolean(record);
+      record ??= await worktrees.create(project.path, project.path);
+      if (!await workspace.save(workspaceState())) throw new Error("Could not save the Freebuff worktree.");
+      if (prompt.trim()) clipboard.writeText(prompt);
+      await openFreebuffTerminal(target, record.path, resume);
+      return record;
+    } finally {
+      openingFreebuff = false;
+    }
+  });
+  handle("review-freebuff", async (id) => {
+    const record = typeof id === "string" ? worktrees.find(id) : undefined;
+    if (!record?.freebuffProject || !(await worktrees.exists(record))) return { available: false };
+    const [diff, transcript, savedExchange] = await Promise.all([
+      worktrees.diff(record, (path, status) => status !== "added" || !FREEBUFF_EXPORT_PATTERN.test(path)),
+      findFreebuffTranscript(record.path),
+      readSavedFreebuffExchange(record.path),
+    ]);
+    return {
+      available: true,
+      diff,
+      transcriptReady: Boolean(transcript),
+      savedExchange,
+    };
+  });
+  handle("copy-freebuff-export", () => {
+    clipboard.writeText(`/export freebuff-result-${Date.now()}.md`);
+  });
   handle("inspect-providers", async () => {
     const connectors = await inspectProviders(getOpenCodePath());
     return connectors.map((connector) => connector.id === "opencode"
@@ -227,11 +284,23 @@ function registerHandlers() {
     const payload = asRecord(request) ?? {};
     const workspaceMode = mode;
     const project = workspaceMode === "code" ? folder : undefined;
+    let freebuffContext: FreebuffContext | undefined;
+    if (payload.freebuff !== undefined) {
+      const { worktreeId, source } = asRecord(payload.freebuff) ?? {};
+      const record = typeof worktreeId === "string" ? worktrees.find(worktreeId) : undefined;
+      if (!project || record?.freebuffProject !== project.path || record.state === "discarded" ||
+          (source !== "saved" && source !== "export") || !(await worktrees.exists(record))) {
+        throw new Error("The attached Freebuff worktree is no longer available.");
+      }
+      freebuffContext = source === "saved" ? await readSavedFreebuffExchange(record.path)
+        : { transcript: await readFreebuffTranscript(record.path) };
+      if (!freebuffContext) throw new Error("Wait for Freebuff to save a completed reply, then send again.");
+    }
     if (payload.edit === true && supportsWorktreeEditing(payload.providerId) && project) {
       await worktrees.inspect(project.path);
-      if (mode !== workspaceMode || folder?.path !== project.path) throw new Error("The selected project changed. Try again.");
     }
-    return runs.start(project, { ...payload, mode: workspaceMode });
+    if (mode !== workspaceMode || (project && folder?.path !== project.path)) throw new Error("The selected project changed. Try again.");
+    return runs.start(project, { ...payload, mode: workspaceMode }, freebuffContext);
   });
   handle("open-reply-link", (value) => {
     if (typeof value !== "string") throw new Error("Invalid link.");
@@ -262,7 +331,7 @@ function registerHandlers() {
       type: "warning",
       title: "Discard worktree",
       message: `Discard ${record.branch}?`,
-      detail: `Honeycomb deletes the worktree folder and the branch it created:\n${record.path}\n\nThe original project and its Git history stay unchanged.`,
+      detail: `${record.freebuffProject ? "Close Freebuff before discarding this worktree.\n\n" : ""}Honeycomb deletes the worktree folder and the branch it created:\n${record.path}`,
       buttons: ["Cancel", "Discard worktree"],
       defaultId: 0,
       cancelId: 0,

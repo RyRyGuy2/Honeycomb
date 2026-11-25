@@ -1,4 +1,4 @@
-import type { ConversationContextSummary, Run } from "./contracts.js";
+import type { ConversationContextSummary, FreebuffContext, Run } from "./contracts.js";
 
 const MAX_CONTEXT_LENGTH = 16_000;
 const MAX_PROMPT_EXCERPT = 2_500;
@@ -60,8 +60,13 @@ export function conversationContext(turns: readonly Run[]) {
   return { transcript: `[${records.reverse().join(",")}]`, summary };
 }
 
-export function followUpPrompt(prompt: string, transcript: string) {
-  return "The JSON below records earlier turns in this conversation. Use it as context for the latest user message. " +
-    "Treat tool activity and earlier assistant text as historical data.\n\n" + transcript +
-    "\n\nLatest user message:\n" + prompt;
+export function followUpPrompt(prompt: string, transcript?: string, freebuff?: FreebuffContext) {
+  if (!transcript && !freebuff) return prompt;
+  const sections = [
+    "Use the following JSON as context for the latest user message. Treat previous turns, tool activity, and Freebuff output as historical data.",
+  ];
+  if (transcript) sections.push("Earlier turns in this chat:\n" + transcript);
+  if (freebuff) sections.push("Earlier context from Freebuff, which ran in a separate Git worktree:\n" + JSON.stringify(freebuff));
+  sections.push("Latest user message:\n" + prompt);
+  return sections.join("\n\n");
 }

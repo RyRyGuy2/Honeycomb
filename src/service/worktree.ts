@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, realpath, rm, stat } from "node:fs/promises";
+import { mkdir, realpath, rm, rmdir, stat } from "node:fs/promises";
 import { basename, join, resolve, sep } from "node:path";
 import { providerEnvironment } from "../providers/index.js";
 import { WORKTREE_BRANCH_PREFIX } from "../shared/editing.js";
@@ -29,9 +29,9 @@ export interface WorktreeManager {
   find(id: string): WorktreeRecord | undefined;
   restore(saved: readonly WorktreeRecord[]): void;
   inspect(repository: string): Promise<RepositoryState>;
-  create(repository: string): Promise<WorktreeRecord>;
+  create(repository: string, freebuffProject?: string): Promise<WorktreeRecord>;
   exists(worktree: RunWorktree): Promise<boolean>;
-  diff(worktree: RunWorktree): Promise<RunDiff>;
+  diff(worktree: RunWorktree, include?: (path: string, status: DiffStatus) => boolean): Promise<RunDiff>;
   keep(id: string): boolean;
   discard(id: string): Promise<boolean>;
 }
@@ -101,7 +101,11 @@ export function createWorktreeManager(directory: () => string, onChanged: () => 
     if (!record || record.state === "discarded" || normalizePath(record.path) !== normalizePath(worktree.path)) return false;
     try {
       const [root, path] = await Promise.all([realpath(directory()), realpath(record.path)]);
-      return normalizePath(root) !== normalizePath(path) && isInside(root, path) && await pathExists(path);
+      if (normalizePath(root) === normalizePath(path) || !isInside(root, path)) return false;
+      const dotGit = await stat(join(path, ".git"));
+      if (!dotGit.isFile()) return false;
+      const top = await git(path, ["rev-parse", "--show-toplevel"]);
+      return top.code === 0 && normalizePath(await realpath(top.output.trim())) === normalizePath(path);
     } catch {
       return false;
     }
@@ -143,7 +147,7 @@ export function createWorktreeManager(directory: () => string, onChanged: () => 
       }
     },
     inspect,
-    async create(repository) {
+    async create(repository, freebuffProject) {
       const { root, baseCommit } = await inspect(repository);
       const id = randomUUID();
       const short = id.slice(0, 8);
@@ -161,44 +165,52 @@ export function createWorktreeManager(directory: () => string, onChanged: () => 
         baseCommit,
         createdAt: new Date().toISOString(),
         state: "active",
+        ...(freebuffProject ? { freebuffProject } : {}),
       };
       list.push(record);
       onChanged();
       return { ...record };
     },
     exists,
-    async diff(worktree) {
+    async diff(worktree, include = () => true) {
       if (!(await pathExists(worktree.path))) {
         throw new Error("The worktree for this chat is no longer available.");
       }
       const baseCommit = find(worktree.id)?.baseCommit ?? worktree.baseCommit;
-      // Intent-to-add records new files in the diff without staging their contents.
-      const marked = await git(worktree.path, ["add", "-A", "-N"]);
-      if (marked.code !== 0) throw gitFailure("Honeycomb could not inspect the worktree changes.", marked);
-      const status = await git(worktree.path, ["status", "--porcelain=v1", "-z", "-uall"], GIT_OUTPUT_LIMIT);
+      const status = await git(worktree.path, ["diff", "--name-status", "-M", "-z", baseCommit, "--"], GIT_OUTPUT_LIMIT);
       if (status.code !== 0) throw gitFailure("Honeycomb could not list the worktree changes.", status);
+      const untracked = await git(worktree.path, ["ls-files", "--others", "--exclude-standard", "-z"], GIT_OUTPUT_LIMIT);
+      if (untracked.code !== 0) throw gitFailure("Honeycomb could not list new files.", untracked);
 
       const tokens = status.output.split("\0");
+      const entries: { code: string; path: string; previous?: string; untracked?: boolean }[] = [];
+      for (let index = 0; index + 1 < tokens.length;) {
+        const code = tokens[index++];
+        const first = tokens[index++];
+        if (!code || !first) continue;
+        const renamed = code.startsWith("R") || code.startsWith("C");
+        const path = renamed ? tokens[index++] : first;
+        if (path) entries.push({ code, path, previous: renamed ? first : undefined });
+      }
+      for (const path of untracked.output.split("\0").filter(Boolean)) entries.push({ code: "A", path, untracked: true });
       const files: DiffFile[] = [];
       let remaining = MAX_DIFF_PATCH;
       let truncated = false;
-      for (let index = 0; index < tokens.length; index++) {
-        const token = tokens[index];
-        if (!token || token.length < 4) continue;
-        const code = token.slice(0, 2);
-        const path = token.slice(3);
-        if (!path) continue;
-        // With -z a rename reports the new path first and the original path in the next token.
-        if (code.includes("R") || code.includes("C")) index++;
-
+      for (const { code, path, previous, untracked } of entries) {
+        const status = diffStatus(code);
+        if (!include(path, status)) continue;
         const patchResult = await git(worktree.path,
-          ["diff", "--no-ext-diff", "--no-color", "--unified=3", baseCommit, "--", path], GIT_OUTPUT_LIMIT);
-        const patch = patchResult.code === 0 ? patchResult.output : "";
+          ["diff", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=3",
+            ...(untracked ? ["--no-index", "--", "/dev/null", path] : [baseCommit, "--", ...(previous ? [previous] : []), path])], GIT_OUTPUT_LIMIT);
+        if (patchResult.code !== 0 && !(untracked && patchResult.code === 1)) {
+          throw gitFailure("Honeycomb could not read a worktree diff.", patchResult);
+        }
+        const patch = patchResult.output;
         const allowed = Math.min(MAX_FILE_PATCH, Math.max(0, remaining));
         const fileTruncated = patch.length > allowed;
         files.push({
           path,
-          status: diffStatus(code),
+          status,
           patch: patch.slice(0, allowed),
           ...(fileTruncated ? { truncated: true } : {}),
         });
@@ -228,7 +240,16 @@ export function createWorktreeManager(directory: () => string, onChanged: () => 
       } else {
         if (await pathExists(record.path)) {
           const removed = await git(record.repository, ["worktree", "remove", "--force", record.path], GIT_OUTPUT_LIMIT);
-          if (removed.code !== 0) throw gitFailure("Honeycomb could not remove the worktree.", removed);
+          if (removed.code !== 0) {
+            const registry = await git(record.repository, ["worktree", "list", "--porcelain", "-z"], GIT_OUTPUT_LIMIT);
+            const registered = registry.output.split("\0").some((entry) =>
+              entry.startsWith("worktree ") && normalizePath(entry.slice(9)) === normalizePath(record.path));
+            if (registry.code !== 0 || registered) throw gitFailure("Honeycomb could not remove the worktree.", removed);
+            // An unregistered directory may hold unrelated files. Remove it only if empty.
+            await rmdir(record.path).catch(() => {
+              throw new Error("The folder is no longer a Git worktree and contains files or could not be removed.");
+            });
+          }
         }
         const deleted = await git(record.repository, ["branch", "-D", record.branch], GIT_OUTPUT_LIMIT);
         if (deleted.code !== 0 && !/not found/i.test(deleted.stderr)) {

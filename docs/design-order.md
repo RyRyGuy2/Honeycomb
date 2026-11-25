@@ -31,7 +31,7 @@ Run history lives in memory. The app reports provider-supplied token counts and 
 
 ## 2. Isolated editing and diff review
 
-**Partly implemented.** The Code composer offers **Read-only** review by default and **Edit in worktree** for Codex and Claude Code. Honeycomb reads the project's current commit once, creates a dedicated branch and worktree under its data directory, and reports both in the reply and Run details. Follow-up edits in that conversation reuse the worktree. Chats shows the changed files, a per-file diff (including new files), and available test results. The user can keep the worktree or discard it after confirmation. Applying or merging the diff is a later milestone.
+**Partly implemented.** The Code composer offers **Read-only** review by default and **Edit in worktree** for Codex, OpenCode and Claude Code. Honeycomb reads the project's current commit once, creates a dedicated branch and worktree under its data directory, and reports both in the reply and Run details. Follow-up edits in that conversation reuse the worktree. Chats shows the changed files, a per-file diff (including new files), and available test results. The user can keep the worktree or discard it after confirmation. Applying or merging the diff is a later milestone.
 
 - Resolve the base commit once and create a dedicated branch and Git worktree for each editing run. Show both in Run details. Git worktrees isolate changes to the checkout. The connector's execution controls govern filesystem and command access.
 - Enable editing only for providers with verified isolation and approval behavior. Surface requested approvals in Chats for providers that can pause and honor a reply. Keep the run available for review after failure or cancellation.

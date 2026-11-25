@@ -6,7 +6,7 @@ import { dirname } from "node:path";
 import { test } from "node:test";
 import { installOpenCodeRelease, managedOpenCodePath, openCodeRelease } from "../dist/providers/opencode-install.js";
 import { mergeOpenCodeModels } from "../dist/providers/opencode-models.js";
-import { opencode, parseOpenCodeModel } from "../dist/providers/opencode.js";
+import { OPENCODE_EDIT_AGENT, opencode, parseOpenCodeModel } from "../dist/providers/opencode.js";
 
 test("OpenCode downloads use a pinned compatible platform asset", () => {
   assert.match(openCodeRelease("win32", "x64").url, /v1\.19\.6\/opencode-windows-x64-baseline\.zip$/);
@@ -73,6 +73,35 @@ test("OpenCode 2.x is detected and invoked with its current CLI flags", () => {
   assert.ok(legacy.args.includes("--pure"));
   assert.equal(legacy.args[legacy.args.indexOf("--agent") + 1], "honeycomb-review");
   assert.equal(legacy.env.OPENCODE_CONFIG_CONTENT?.includes("honeycomb-review"), true);
+});
+
+test("OpenCode edit runs use a scoped worktree edit agent in both CLI generations", () => {
+  const current = opencode.command("fix", undefined, "2.4.1", "edit");
+  assert.equal(current.args[current.args.indexOf("--agent") + 1], OPENCODE_EDIT_AGENT);
+  const modern = JSON.parse(current.env.OPENCODE_CONFIG_CONTENT);
+  const agent = modern.agents[OPENCODE_EDIT_AGENT];
+  assert.equal(agent.mode, "primary");
+  assert.match(agent.system, /dedicated Git worktree/);
+  assert.deepEqual(agent.permissions.find((rule) => rule.action === "edit"), { action: "edit", resource: "*", effect: "allow" });
+  assert.deepEqual(agent.permissions.find((rule) => rule.action === "shell"), { action: "shell", resource: "*", effect: "allow" });
+  assert.deepEqual(agent.permissions.find((rule) => rule.action === "external_directory"), { action: "external_directory", resource: "*", effect: "deny" });
+  assert.equal(modern.policies.some((rule) => rule.action === "tool.use"), false);
+
+  const legacy = opencode.command("fix", undefined, "1.19.6", "edit");
+  assert.ok(legacy.args.includes("--pure"));
+  assert.equal(legacy.args[legacy.args.indexOf("--agent") + 1], OPENCODE_EDIT_AGENT);
+  const old = JSON.parse(legacy.env.OPENCODE_CONFIG_CONTENT);
+  const oldAgent = old.agent[OPENCODE_EDIT_AGENT];
+  assert.equal(oldAgent.permission.write, "allow");
+  assert.equal(oldAgent.permission.edit, "allow");
+  assert.equal(oldAgent.permission.bash, "allow");
+  assert.equal(oldAgent.permission.external_directory, "deny");
+  assert.equal(oldAgent.permission.read[".env*"], "deny");
+  assert.equal(old.permission.bash, "allow");
+
+  const review = opencode.command("review", undefined, "1.19.6");
+  assert.equal(review.args[review.args.indexOf("--agent") + 1], "honeycomb-review");
+  assert.equal(JSON.parse(review.env.OPENCODE_CONFIG_CONTENT).agent[OPENCODE_EDIT_AGENT], undefined);
 });
 
 test("the selected model is passed to OpenCode and 429s have an actionable message", () => {

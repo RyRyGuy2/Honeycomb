@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { ProviderId } from "../shared/contracts.js";
 import { runJsonRpc } from "../service/json-rpc.js";
 import type { JsonRpc } from "../service/json-rpc.js";
-import { isOpenCodeV2, opencode } from "./opencode.js";
+import { isOpenCodeV2, OPENCODE_EDIT_AGENT, opencode } from "./opencode.js";
 import type { ProviderUsageEvent } from "./types.js";
 
 export type StreamEvent =
@@ -105,12 +105,12 @@ function codexStream(transport: Transport, prompt: string, model: string | undef
   });
 }
 
-function openCodeTransport(transport: Transport, version?: string): Transport {
+function openCodeTransport(transport: Transport, version: string | undefined, mode: "review" | "edit" = "review"): Transport {
   const modern = isOpenCodeV2(version);
   return {
     ...transport,
     args: [...transport.args, "acp", ...(modern ? [] : ["--pure"]), "--log-level", modern ? "error" : "ERROR"],
-    env: { ...transport.env, ...opencode.command("", undefined, version).env },
+    env: { ...transport.env, ...opencode.command("", undefined, version, mode).env },
   };
 }
 
@@ -152,11 +152,13 @@ export async function openCodeEfforts(transport: Transport, model: string, versi
 
 function openCodeStream(
   transport: Transport, prompt: string, model: string | undefined, version: string | undefined, publish: Publish, effort?: string,
-  chat = false,
+  chat = false, edit = false,
 ) {
   const modern = isOpenCodeV2(version);
-  const runner = openCodeTransport(transport, version);
-  const agent = chat ? "honeycomb-chat-" + randomUUID() : modern ? "plan" : "honeycomb-review";
+  const runner = openCodeTransport(transport, version, edit ? "edit" : "review");
+  const agent = chat ? "honeycomb-chat-" + randomUUID()
+    : edit ? OPENCODE_EDIT_AGENT
+      : modern ? "plan" : "honeycomb-review";
   if (chat) {
     const instructions = "Answer the user's question directly in text.";
     const isolated = modern ? {
@@ -270,6 +272,13 @@ export function streamOpenCodeChat(
   transport: Transport, prompt: string, model: string | undefined, version: string | undefined, publish: Publish, effort?: string,
 ) {
   return openCodeStream(transport, prompt, model, version, publish, effort, true);
+}
+
+export function streamOpenCodeEdit(
+  transport: Transport & { cwd: string }, prompt: string, model: string | undefined, version: string | undefined, publish: Publish, effort?: string,
+) {
+  if (!transport.cwd) throw new Error("OpenCode editing requires a Git worktree.");
+  return openCodeStream(transport, prompt, model, version, publish, effort, false, true);
 }
 
 export function streamCodexChat(transport: Transport, prompt: string, model: string | undefined, publish: Publish, effort?: string) {

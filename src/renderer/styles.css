@@ -476,6 +476,15 @@ main { grid-column: 3; }
   font-size: 11px;
   line-height: 1.4;
 }
+#remove-freebuff-context {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-decoration: underline;
+}
+#remove-freebuff-context:hover { color: var(--text); }
 
 .composer-actions, .composer-options { display: flex; gap: 9px; align-items: center; }
 .composer-actions { justify-content: space-between; }
@@ -611,7 +620,21 @@ main { grid-column: 3; }
 .diff-remove { color: #e08c8c; background: color-mix(in srgb, #e08c8c 9%, transparent); }
 .diff-meta { color: var(--subtle); }
 .diff-note { margin-top: 8px; color: var(--subtle); font-size: 11px; line-height: 1.45; }
-.diff-actions { display: flex; gap: 8px; margin-top: 11px; }
+.diff-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 11px; }
+.freebuff-options, .freebuff-archive { margin-top: 10px; color: var(--muted); font-size: 12px; }
+.freebuff-options > summary, .freebuff-archive > summary { cursor: pointer; width: fit-content; }
+.freebuff-reply { margin-top: 12px; }
+.freebuff-reply > summary { cursor: pointer; width: fit-content; font-weight: 600; }
+.freebuff-reply > p {
+  margin-top: 6px;
+  max-height: 280px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  line-height: 1.55;
+}
+.freebuff-archive > .diff-review { margin-top: 8px; }
+#feed:not([hidden]) + #freebuff-handoffs { margin-top: 16px; }
 
 .library { overflow: auto; width: min(100%, 980px); margin: 0 auto; padding: 42px 36px; }
 .library-header { margin-bottom: 24px; }
@@ -671,6 +694,20 @@ main { grid-column: 3; }
 .connector-result > div { flex: 1; min-width: 0; }
 .connector-result h2 { font-size: 15px; }
 .connector-result .connector-note { margin-top: 4px; }
+.connector-install-command {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  margin-block: 8px;
+}
+.connector-install-command code {
+  padding: 5px 8px;
+  border-radius: 4px;
+  background: var(--rail);
+  overflow-wrap: anywhere;
+  user-select: text;
+}
 .connector-model-settings { border-top: 1px solid var(--border); margin-top: 18px; padding-top: 2px; }
 .model-field { display: grid; gap: 7px; margin: 14px 0; }
 .model-field label { font-weight: 650; }

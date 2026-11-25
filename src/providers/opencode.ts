@@ -2,6 +2,8 @@ import { asRecord } from "../shared/records.js";
 import type { ProviderAdapter } from "./types.js";
 
 const AGENT = "honeycomb-review";
+export const OPENCODE_EDIT_AGENT = "honeycomb-edit";
+const EDIT_INSTRUCTIONS = "You are editing inside a dedicated Git worktree created by Honeycomb. The working directory is that worktree. Make the requested change there only, run focused tests when they help verify it, then summarize what changed. Do not modify any other checkout.";
 const RATE_LIMIT = "OpenCode's model is rate limited. Wait and retry, or select another configured model in Connectors.";
 
 // OpenCode 2.x is a different CLI generation: `--pure` is gone, log levels are
@@ -18,19 +20,43 @@ export function parseOpenCodeModel(value: unknown): string {
   }
   return model;
 }
+const readPermissions = {
+  "*": "allow",
+  ".env*": "deny",
+  "*/.env*": "deny",
+  "*.env": "deny",
+  "*.env.*": "deny",
+};
 const toolPermissions = {
   "*": "deny",
-  read: {
-    "*": "allow",
-    ".env*": "deny",
-    "*/.env*": "deny",
-    "*.env": "deny",
-    "*.env.*": "deny",
-  },
+  read: readPermissions,
   glob: "allow",
   grep: "allow",
   external_directory: "deny",
 };
+// Edits are allowed only in the worktree Honeycomb uses as the run's cwd. Shell runs with the
+// host user's authority, so every permission request is still denied by the ACP client.
+const editToolPermissions = {
+  ...toolPermissions,
+  write: "allow",
+  edit: "allow",
+  patch: "allow",
+  bash: "allow",
+};
+const editPolicies = (["skill", "mcp", "websearch", "plugin"] as const).map((action) => ({
+  action: `${action}.use`, resource: "*", effect: "deny",
+}));
+const v2EditPermissions = [
+  { action: "*", resource: "*", effect: "deny" },
+  { action: "read", resource: "*", effect: "allow" },
+  { action: "read", resource: "*.env", effect: "deny" },
+  { action: "read", resource: "*.env.*", effect: "deny" },
+  { action: "glob", resource: "*", effect: "allow" },
+  { action: "grep", resource: "*", effect: "allow" },
+  { action: "edit", resource: "*", effect: "allow" },
+  { action: "shell", resource: "*", effect: "allow" },
+  { action: "external_directory", resource: "*", effect: "deny" },
+];
 
 export const opencode: ProviderAdapter = {
   id: "opencode",
@@ -49,34 +75,58 @@ export const opencode: ProviderAdapter = {
     const [major = 0, minor = 0] = version.split(".").map(Number);
     if (major < 1 || (major === 1 && minor < 14)) return "This adapter uses OpenCode 1.14 or newer.";
   },
-  command(prompt, model, version) {
+  command(prompt, model, version, mode = "review") {
     const current = isOpenCodeV2(version);
+    const edit = mode === "edit";
+    const agent = edit ? OPENCODE_EDIT_AGENT : current ? "plan" : AGENT;
     const args = ["run", "--format", "json"];
     if (!current) args.push("--pure");
-    args.push("--agent", current ? "plan" : AGENT, "--print-logs", "--log-level", current ? "error" : "ERROR");
+    args.push("--agent", agent, "--print-logs", "--log-level", current ? "error" : "ERROR");
     if (model) args.push("--model", model);
+    const config = edit ? current ? {
+      tools: { skill: false },
+      agents: {
+        title: { disabled: true },
+        [OPENCODE_EDIT_AGENT]: {
+          mode: "primary",
+          system: EDIT_INSTRUCTIONS,
+          permissions: v2EditPermissions,
+        },
+      },
+      policies: editPolicies,
+    } : {
+      share: "disabled",
+      agent: {
+        title: { disable: true },
+        [OPENCODE_EDIT_AGENT]: {
+          mode: "primary",
+          description: "Edit the selected project inside its worktree",
+          prompt: EDIT_INSTRUCTIONS,
+          permission: editToolPermissions,
+        },
+      },
+      permission: editToolPermissions,
+    } : current ? undefined : {
+      share: "disabled",
+      agent: {
+        [AGENT]: {
+          mode: "primary",
+          description: "Read and explain the selected project",
+          prompt: "Review the project and answer in text. Leave the workspace unchanged.",
+          permission: toolPermissions,
+        },
+      },
+    };
     return {
       args,
       input: prompt,
       env: {
-        // Each Honeycomb review starts a new session with its own schema.
+        // Each Honeycomb run starts a new session with its own schema.
         OPENCODE_DB: ":memory:",
         OPENCODE_DISABLE_AUTOUPDATE: "true",
         OPENCODE_DISABLE_PROJECT_CONFIG: "true",
         OPENCODE_DISABLE_CLAUDE_CODE: "true",
-        ...(current ? {} : {
-          OPENCODE_CONFIG_CONTENT: JSON.stringify({
-            share: "disabled",
-            agent: {
-              [AGENT]: {
-                mode: "primary",
-                description: "Read and explain the selected project",
-                prompt: "Review the project and answer in text. Leave the workspace unchanged.",
-                permission: toolPermissions,
-              },
-            },
-          }),
-        }),
+        ...(config ? { OPENCODE_CONFIG_CONTENT: JSON.stringify(config) } : {}),
       },
     };
   },

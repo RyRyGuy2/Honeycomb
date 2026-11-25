@@ -4,6 +4,7 @@ import type {
 } from "../shared/contracts.js";
 import { compareTurns, conversationContext, conversationId, runMode } from "../shared/conversations.js";
 import { supportsWorktreeEditing } from "../shared/editing.js";
+import type { FreebuffAttachment, FreebuffReview, WorktreeRecord } from "../shared/contracts.js";
 
 declare global {
   interface Window {
@@ -16,6 +17,18 @@ declare global {
 }
 
 const api = window.honeycomb;
+const installCommands = {
+  codex: "npm install -g @openai/codex",
+  opencode: "npm install -g @opencode/cli",
+  claude: "npm install -g @anthropic-ai/claude-code@latest",
+  freebuff: "npm install -g freebuff",
+} satisfies Record<ProviderId | "freebuff", string>;
+let freebuffWorktrees: WorktreeRecord[] = [];
+const freebuffReviews = new Map<string, FreebuffReview>();
+const freebuffErrors = new Map<string, string>();
+const freebuffNotices = new Map<string, string>();
+const freebuffChecking = new Set<string>();
+let olderFreebuffOpen = false;
 const markdown = window.markdownit({ html: false });
 markdown.disable("image");
 const viewButtons = document.querySelectorAll<HTMLButtonElement>("[data-view]");
@@ -47,7 +60,7 @@ const connectorLabels = {
 } satisfies Record<ConnectorStatus, string>;
 const connectorDescriptions = {
   codex: "Uses the Codex CLI’s read-only sandbox.",
-  opencode: "Uses OpenCode’s agent permissions to read and search the project.",
+  opencode: "Uses OpenCode’s scoped agent permissions to read, search and edit in a worktree.",
   claude: "Uses Claude Code with read and search tools only, no MCP servers, and no project settings.",
 } satisfies Record<ProviderId, string>;
 const providerNames = {
@@ -72,6 +85,7 @@ let mode: WorkspaceMode = "code";
 let switchingMode = false;
 let codexChatModel = "";
 const drafts = new Map<string, string>();
+const freebuffAttachments = new Map<string, FreebuffAttachment>();
 const editAccess = new Set<string>();
 let draftKey: string | undefined;
 const lastChatByMode: Partial<Record<WorkspaceMode, string | undefined>> = {};
@@ -199,13 +213,30 @@ function showError(error: unknown) {
 
 function renderControls() {
   const active = activeRun();
-  const busy = Boolean(active) || starting || switchingMode;
+  const busy = Boolean(active) || starting || switchingMode || worktreeBusy;
   const stop = get("stop-run", HTMLButtonElement);
   const providerId = chatProviderId();
   const provider = connectors.find((connector) => connector.id === providerId);
   const saving = pendingModel?.providerId === providerId;
   const modelPending = Boolean(modelRequests[providerId]) || saving;
   const needsProject = mode === "code" && (!folder || (!selectedChatId && newProjectPath !== folder.path));
+  const freebuffOption = get("freebuff-provider", HTMLOptionElement);
+  freebuffOption.hidden = mode !== "code";
+  freebuffOption.disabled = mode !== "code";
+  if (mode !== "code" && providerField.value === "freebuff") providerField.value = "codex";
+  const freebuff = providerField.value === "freebuff";
+  const resumeFreebuff = freebuff && Boolean(latestActiveFreebuff());
+  const attachment = pendingFreebuff();
+  const contextStatus = get("composer-freebuff-status");
+  const removeAttachment = get("remove-freebuff-context", HTMLButtonElement);
+  contextStatus.hidden = freebuff || (!attachment && !chatTurns().some((turn) => turn.freebuffContext));
+  contextStatus.textContent = attachment
+    ? attachment.source === "export" ? "Freebuff transcript attached" : "Freebuff exchange attached"
+    : "Freebuff context included";
+  removeAttachment.hidden = freebuff || !attachment;
+  removeAttachment.disabled = busy;
+  get("chat-model-control").hidden = freebuff;
+  thinkingField.hidden = freebuff;
   providerField.disabled = Boolean(selectedChatId) || busy;
   projectPicker.disabled = choosing || busy;
   for (const button of document.querySelectorAll<HTMLButtonElement>(".project-new-chat")) {
@@ -217,21 +248,25 @@ function renderControls() {
   stop.hidden = !active;
   stop.disabled = active?.status === "stopping";
   stop.textContent = stop.disabled ? "Stopping…" : "Stop run";
-  runButton.disabled = needsProject || busy || choosing || modelPending ||
-    !promptField.value.trim() || provider?.status !== "detected";
+  runButton.disabled = needsProject || busy || choosing || !promptField.value.trim() ||
+    (!freebuff && (modelPending || provider?.status !== "detected"));
+  const freshFreebuff = document.querySelector<HTMLButtonElement>("[data-freebuff-fresh]");
+  if (freshFreebuff) freshFreebuff.disabled = !freebuff || runButton.disabled;
   const canEdit = mode === "code" && supportsWorktreeEditing(providerId);
   const editing = canEdit && draftKey !== undefined && editAccess.has(draftKey);
-  get("composer-access").hidden = mode !== "code";
+  get("composer-access").hidden = mode !== "code" || freebuff;
   accessPicker.disabled = busy || choosing;
-  accessPicker.title = canEdit ? "Choose whether to review or edit in a separate Git worktree." : "OpenCode supports read-only review in Honeycomb.";
+  accessPicker.title = canEdit ? "Choose whether to review or edit in a separate Git worktree." : "This connector supports read-only review in Honeycomb.";
   editAccessOption.disabled = !canEdit;
   accessPicker.value = editing ? "edit" : "review";
-  get("send-label").textContent = editing ? "Send edit" : selectedChatId || mode === "chat" ? "Send" : "Run task";
+  get("send-label").textContent = freebuff ? (resumeFreebuff ? "Continue in Freebuff" : "Open in Freebuff")
+    : editing ? "Send edit" : selectedChatId || mode === "chat" ? "Send" : "Run task";
   chatStatus.dataset.error = String(Boolean(actionError));
 
   let message = actionError;
   if (!message && needsProject) message = "Choose a project above to start a Code chat.";
   if (!message && active) message = `${active.providerName} is ${statusLabels[active.status].toLowerCase()}.`;
+  if (!message && freebuff) message = worktreeBusy ? "Working on the Freebuff handoff…" : "Paste and send the copied prompt in Freebuff.";
   if (!message && provider?.status === "checking") message = `Checking for ${provider.name}…`;
   if (!message && provider?.status !== "detected") message = `${provider?.name ?? "The connector"} is unavailable. See Connectors for details.`;
   if (!message && modelPending) message = saving ? `Saving ${provider?.name} model…` : `Loading ${provider?.name} models…`;
@@ -244,6 +279,10 @@ function chatProviderId(): ProviderId {
 }
 
 function renderComposerProvider() {
+  if (mode === "code" && providerField.value === "freebuff") {
+    renderControls();
+    return;
+  }
   const providerId = chatProviderId();
   if (!get("chats").hidden && !modelCatalogs[providerId] &&
       connectors.some((connector) => connector.id === providerId && connector.status === "detected")) {
@@ -258,7 +297,7 @@ async function selectWorkspaceProject(
   select: () => Promise<ProjectFolder | undefined>,
   { register = false, startNew = false, chatId }: { register?: boolean; startNew?: boolean; chatId?: string } = {},
 ) {
-  if (mode !== "code" || choosing || starting || switchingMode) return false;
+  if (mode !== "code" || choosing || starting || switchingMode || worktreeBusy) return false;
   choosing = true;
   actionError = "";
   renderControls();
@@ -271,6 +310,7 @@ async function selectWorkspaceProject(
     }
     const keepChat = register && !startNew && folder?.path === selection.path;
     if (folder?.path !== selection.path || (startNew && selectedChatId)) editAccess.delete("new:code");
+    if (folder?.path !== selection.path || startNew) freebuffAttachments.delete("new:code");
     folder = selection;
     if (!keepChat) selectedChatId = startNew ? undefined : chatId && chatTurns(chatId).length ? chatId : projectChats()[0]?.id;
     newProjectPath = selectedChatId ? undefined : selection.path;
@@ -281,6 +321,7 @@ async function selectWorkspaceProject(
   } finally {
     choosing = false;
     renderChats();
+    refreshLatestFreebuff();
   }
 }
 
@@ -547,7 +588,7 @@ function diffPatch(patch: string) {
   return pre;
 }
 
-function runChanges(run: Run, latest: boolean) {
+function runChanges(run: Pick<Run, "worktree" | "diff">, latest: boolean, external = false) {
   const worktree = run.worktree;
   if (!worktree) return undefined;
   const section = element("section", "diff-review");
@@ -563,14 +604,14 @@ function runChanges(run: Run, latest: boolean) {
 
   const diff = run.diff;
   if (!diff) {
-    section.append(element("p", "diff-empty", "Changed files appear here when the run finishes."));
+    section.append(element("p", "diff-empty", external ? "Waiting for the first worktree check." : "Changed files appear here when the run finishes."));
   } else if (!diff.files.length) {
-    section.append(element("p", "diff-empty", "No file changes were recorded in the worktree."));
+    section.append(element("p", "diff-empty", external ? "No code changes yet." : "No file changes were recorded in the worktree."));
   } else {
     const files = element("div", "diff-files");
     for (const file of diff.files) {
       const item = element("details", "diff-file");
-      item.open = true;
+      item.open = !external;
       const summary = element("summary", "");
       summary.append(element("span", "diff-status", diffLabels[file.status]), element("span", "diff-name", file.path));
       item.append(summary, diffPatch(file.patch));
@@ -601,6 +642,193 @@ function runChanges(run: Run, latest: boolean) {
       element("p", "diff-note", "Your checkout is unchanged. Discard removes only this worktree and branch after confirmation."));
   }
   return section;
+}
+
+async function reviewFreebuffWorktree(id: string) {
+  if (freebuffChecking.has(id)) return;
+  freebuffChecking.add(id);
+  try {
+    freebuffReviews.set(id, await api.reviewFreebuff(id));
+    freebuffErrors.delete(id);
+  } catch (error) {
+    freebuffErrors.set(id, error instanceof Error
+      ? error.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, "")
+      : "Honeycomb could not read the worktree.");
+  } finally {
+    freebuffChecking.delete(id);
+  }
+}
+
+type FreebuffAction = "send" | "fresh" | "open" | "replace" | "review" | "export" | "import" | "use-reply" | "keep" | "discard";
+
+async function freebuffAction(action: FreebuffAction, id?: string) {
+  if (worktreeBusy) return;
+  worktreeBusy = true;
+  actionError = "";
+  const targetDraft = draftKey;
+  const targetProject = folder?.path;
+  renderChats();
+  try {
+    if (action === "open" || action === "replace" || action === "send" || action === "fresh") {
+      const prompt = action === "open" || (action === "replace" && providerField.value !== "freebuff") ? "" : promptField.value;
+      const record = await api.openFreebuff({ prompt, id, replace: action === "replace" });
+      freebuffNotices.set(record.id, prompt.trim() ? "Prompt copied. Paste it into Freebuff and press Enter." : "Freebuff opened in Windows Terminal.");
+      if (targetDraft && targetDraft === draftKey && targetProject === folder?.path && mode === "code") {
+        freebuffAttachments.set(targetDraft, { worktreeId: record.id, source: "saved" });
+      }
+    } else if (id && action === "review") await reviewFreebuffWorktree(id);
+    else if (id && action === "export") {
+      await api.copyFreebuffExport();
+      freebuffNotices.set(id, "Export command copied. Paste and run it in Freebuff, then return here.");
+    }
+    else if (id && (action === "import" || action === "use-reply")) {
+      const review = freebuffReviews.get(id);
+      if (!review?.available || !(action === "import" ? review.transcriptReady : review.savedExchange)) {
+        throw new Error("Refresh the worktree after Freebuff finishes.");
+      }
+      if (!targetDraft || targetDraft !== draftKey || targetProject !== folder?.path || mode !== "code") {
+        throw new Error("Return to the original draft to attach the Freebuff exchange.");
+      }
+      freebuffAttachments.set(targetDraft, { worktreeId: id, source: action === "import" ? "export" : "saved" });
+      if (!promptField.value.trim()) {
+        promptField.value = "Review the Freebuff results and tell me what to do next.";
+        promptField.select();
+      }
+      if (providerField.value === "freebuff") {
+        providerField.value = "codex";
+        renderComposerProvider();
+      }
+      promptField.focus();
+    }
+    else if (id && action === "keep") await api.keepWorktree(id);
+    else if (id && await api.discardWorktree(id)) {
+      freebuffReviews.delete(id);
+      freebuffErrors.delete(id);
+      freebuffNotices.delete(id);
+      for (const [key, attachment] of freebuffAttachments) {
+        if (attachment.worktreeId === id) freebuffAttachments.delete(key);
+      }
+    }
+  } catch (error) {
+    showError(error);
+  } finally {
+    try {
+      freebuffWorktrees = (await api.getState()).worktrees ?? [];
+    } catch (error) {
+      showError(error);
+    }
+    worktreeBusy = false;
+    renderChats();
+    if (action === "open" || action === "replace" || action === "send" || action === "fresh") refreshLatestFreebuff();
+  }
+}
+
+function projectFreebuffWorktrees() {
+  return mode === "code" && folder
+    ? freebuffWorktrees.filter((record) => record.freebuffProject === folder?.path && record.state !== "discarded").reverse()
+    : [];
+}
+
+function pendingFreebuff() {
+  const attachment = draftKey && freebuffAttachments.get(draftKey);
+  if (mode !== "code" || !folder || !attachment) return;
+  if (freebuffWorktrees.some((record) =>
+    record.id === attachment.worktreeId && record.freebuffProject === folder?.path && record.state !== "discarded")) {
+    return attachment;
+  }
+}
+
+function latestActiveFreebuff() {
+  const [latest] = projectFreebuffWorktrees();
+  return latest?.state === "active" && freebuffReviews.get(latest.id)?.available !== false ? latest : undefined;
+}
+
+function freebuffCard(record: WorktreeRecord, latest: boolean) {
+  const review = freebuffReviews.get(record.id);
+  const diff = review?.available ? review.diff : undefined;
+  const card = runChanges({ worktree: record, diff }, false, true)!;
+  const count = diff?.files.length ?? 0;
+  card.querySelector("h3")!.textContent = count ? `Freebuff · ${countLabel(count, "changed file")}` : "Freebuff worktree";
+  const actions = element("div", "diff-actions");
+  const error = freebuffErrors.get(record.id);
+  const unavailable = review?.available === false;
+  if (error || unavailable) {
+    card.querySelector(".diff-empty")?.remove();
+    const status = element("p", "diff-note", unavailable ? "This folder is no longer registered as a Git worktree." : error);
+    status.setAttribute("role", "status");
+    card.append(status);
+  }
+  const notice = freebuffNotices.get(record.id);
+  if (notice && !unavailable) {
+    const status = element("p", "diff-note", notice);
+    status.setAttribute("role", "status");
+    card.append(status);
+  }
+  const savedReply = review?.available ? review.savedExchange?.reply : undefined;
+  if (savedReply) {
+    const reply = element("details", "freebuff-reply");
+    reply.open = latest;
+    reply.append(element("summary", "", "Latest Freebuff reply"), element("p", "", savedReply));
+    card.append(reply);
+  }
+  const options = element("details", "freebuff-options");
+  options.append(element("summary", "", "Worktree options"));
+  for (const meta of card.querySelectorAll(".diff-meta, .diff-path")) options.append(meta);
+  const extras = element("div", "diff-actions");
+  const addAction = (parent: HTMLElement, action: FreebuffAction, label: string) => {
+    const button = element("button", "button button-small", label);
+    button.type = "button";
+    button.disabled = worktreeBusy;
+    button.addEventListener("click", () => void freebuffAction(action, action === "fresh" ? undefined : record.id));
+    parent.append(button);
+    return button;
+  };
+  if (unavailable) {
+    addAction(actions, "replace", "Create replacement");
+  } else {
+    addAction(actions, "review", "Refresh changes");
+    if (savedReply) {
+      addAction(actions, "use-reply", "Use reply");
+      if (review?.available && review.transcriptReady) addAction(extras, "import", "Use exported transcript");
+      addAction(extras, "export", "Copy export command");
+    } else if (review?.available && review.transcriptReady) {
+      addAction(actions, "import", "Use transcript");
+      addAction(extras, "export", "Copy new export command");
+    } else {
+      addAction(actions, "export", "Copy export command");
+    }
+    addAction(extras, "open", "Resume in Freebuff");
+    if (record.state === "active") addAction(extras, "keep", "Keep worktree");
+  }
+  if (latest && providerField.value === "freebuff") {
+    const fresh = addAction(extras, "fresh", "Start new worktree");
+    fresh.dataset.freebuffFresh = "";
+    fresh.disabled = runButton.disabled;
+    fresh.title = "Use the current draft to start a separate Freebuff worktree.";
+  }
+  addAction(extras, "discard", "Discard worktree");
+  options.append(extras);
+  card.append(actions, options);
+  return card;
+}
+
+function renderFreebuff() {
+  const panel = get("freebuff-handoffs");
+  const [latest, ...older] = projectFreebuffWorktrees();
+  panel.hidden = !latest;
+  get("welcome").hidden = Boolean(latest || selectedChatId);
+  if (!latest) {
+    panel.replaceChildren();
+    return;
+  }
+  panel.replaceChildren(freebuffCard(latest, true));
+  if (!older.length) return;
+  const archive = element("details", "freebuff-archive");
+  archive.open = olderFreebuffOpen;
+  archive.append(element("summary", "", countLabel(older.length, "earlier Freebuff worktree")),
+    ...older.map((record) => freebuffCard(record, false)));
+  archive.addEventListener("toggle", () => { if (archive.isConnected) olderFreebuffOpen = archive.open; });
+  panel.append(archive);
 }
 
 function runTests(run: Run) {
@@ -751,6 +979,7 @@ function renderChats() {
   title.title = first ? title.textContent : "";
   renderSidebar();
   renderThread(turns);
+  renderFreebuff();
   renderDetails(turns.at(-1));
   if (providerChanged) renderComposerProvider();
   else renderControls();
@@ -791,6 +1020,7 @@ async function switchMode(next: WorkspaceMode) {
   } finally {
     switchingMode = false;
     renderControls();
+    refreshLatestFreebuff();
   }
 }
 
@@ -816,6 +1046,7 @@ function renderConnectors() {
   mark.classList.toggle("claude", connector.id === "claude");
   get("connector-title").textContent = connector.name;
   get("connector-description").textContent = connectorDescriptions[connector.id];
+  get("connector-install").replaceChildren(installCommand(connector.id, connector.name));
   get("connector-status").replaceChildren(statusDot(connector.status), connectorLabels[connector.status]);
   get("connector-version").textContent = connector.version ?? "";
   get("connector-version-row").hidden = !connector.version;
@@ -840,6 +1071,28 @@ function renderConnectors() {
   if (catalogOpen) renderCatalog();
 }
 
+function installCommand(id: ProviderId | "freebuff", name: string) {
+  const row = element("div", "connector-install-command");
+  const command = installCommands[id];
+  const copy = element("button", "button button-small", "Copy");
+  copy.type = "button";
+  copy.setAttribute("aria-label", `Copy ${name} install command`);
+  const status = element("span", "visually-hidden");
+  status.setAttribute("role", "status");
+  copy.addEventListener("click", async () => {
+    try {
+      await api.copyInstallCommand(command);
+      copy.textContent = "Copied";
+      status.textContent = "Install command copied.";
+    } catch {
+      copy.textContent = "Copy failed";
+      status.textContent = "Select the command text to copy it manually.";
+    }
+  });
+  row.append(element("code", "", command), copy, status);
+  return row;
+}
+
 function renderCatalog() {
   const query = get("connector-search", HTMLInputElement).value.trim().toLowerCase();
   const results = connectors.filter(({ name, id }) =>
@@ -851,6 +1104,7 @@ function renderCatalog() {
       element("h2", "", connector.name),
       element("p", "connector-note", connectorDescriptions[connector.id]),
       element("p", "connector-note", connectorLabels[connector.status]),
+      installCommand(connector.id, connector.name),
     );
     const actions = element("div", "connector-actions");
     const details = element("button", "button button-small", `View ${connector.name}`);
@@ -873,6 +1127,24 @@ function renderCatalog() {
     card.append(text, actions);
     return card;
   });
+  const freebuffDescription = "Opens the official CLI in a separate Git worktree on Windows.";
+  if (`Freebuff ${freebuffDescription}`.toLowerCase().includes(query)) {
+    const card = element("article", "connector-result");
+    const info = element("div");
+    info.append(element("h2", "", "Freebuff"), element("p", "connector-note", freebuffDescription), installCommand("freebuff", "Freebuff"));
+    const use = element("button", "button button-small", "Use Freebuff");
+    use.type = "button";
+    use.addEventListener("click", async () => {
+      if (mode !== "code") await switchMode("code");
+      if (mode !== "code" || starting || activeRun()) return;
+      selectChat(undefined);
+      providerField.value = "freebuff";
+      showView("chats");
+      (newProjectPath ? promptField : projectPicker).focus();
+    });
+    card.append(info, use);
+    cards.push(card);
+  }
   get("connector-results").replaceChildren(...(cards.length ? cards : [element("p", "connector-note", "No connectors match your search.")]));
 }
 
@@ -1138,6 +1410,7 @@ get("new-task").addEventListener("click", () => {
   if (mode === "code") {
     newProjectPath = undefined;
     editAccess.delete("new:code");
+    freebuffAttachments.delete("new:code");
   }
   selectChat(undefined);
   (mode === "code" ? projectPicker : promptField).focus();
@@ -1186,8 +1459,19 @@ promptField.addEventListener("input", () => {
 });
 providerField.addEventListener("change", () => {
   actionError = "";
+  if (providerField.value === "freebuff" && draftKey && !pendingFreebuff()) {
+    const worktree = latestActiveFreebuff();
+    if (worktree) freebuffAttachments.set(draftKey, { worktreeId: worktree.id, source: "saved" });
+  }
   if (draftKey && !supportsWorktreeEditing(chatProviderId())) editAccess.delete(draftKey);
+  renderFreebuff();
   renderComposerProvider();
+});
+get("remove-freebuff-context").addEventListener("click", () => {
+  if (draftKey) freebuffAttachments.delete(draftKey);
+  actionError = "";
+  renderControls();
+  promptField.focus();
 });
 accessPicker.addEventListener("change", () => {
   if (!draftKey) return;
@@ -1208,6 +1492,8 @@ async function startTask() {
   if (!connector || starting || runButton.disabled) return;
   const edit = mode === "code" && supportsWorktreeEditing(connector.id) && accessPicker.value === "edit";
   const draft = promptField.value;
+  const key = draftKey;
+  const freebuff = pendingFreebuff();
   const chatId = selectedChatId;
   starting = true;
   actionError = "";
@@ -1216,7 +1502,9 @@ async function startTask() {
     const runId = await api.startRun({
       providerId: connector.id, conversationId: chatId, prompt: draft, effort: thinkingField.value, model: chatModelField.value,
       ...(edit ? { edit: true } : {}),
+      ...(freebuff ? { freebuff } : {}),
     });
+    if (freebuff && key) freebuffAttachments.delete(key);
     if (promptField.value === draft) promptField.value = "";
     if (!chatId && edit) {
       editAccess.delete("new:code");
@@ -1234,8 +1522,24 @@ async function startTask() {
 
 get("composer").addEventListener("submit", (event) => {
   event.preventDefault();
-  void startTask();
+  if (runButton.disabled) return;
+  if (providerField.value === "freebuff") {
+    const existing = latestActiveFreebuff();
+    void freebuffAction("send", existing?.id);
+  }
+  else void startTask();
 });
+
+function refreshLatestFreebuff() {
+  if (worktreeBusy || mode !== "code" || !folder) return;
+  const [latest] = projectFreebuffWorktrees();
+  if (!latest) return;
+  void reviewFreebuffWorktree(latest.id).then(() => {
+    renderFreebuff();
+    renderControls();
+  });
+}
+window.addEventListener("focus", refreshLatestFreebuff);
 
 api.onRunChanged((run) => {
   const previous = runs.get(run.id);
@@ -1253,9 +1557,11 @@ api.onRunChanged((run) => {
 renderChats();
 void refreshConnectors();
 api.getState().then((state) => {
+  freebuffWorktrees = state.worktrees ?? [];
   folder = state.folder;
   projects = state.projects;
   mode = state.mode === "chat" ? "chat" : "code";
+  refreshLatestFreebuff();
   for (const run of state.runs) remember(run);
   selectedChatId ??= recentChatId();
   renderWorkspaceMode();

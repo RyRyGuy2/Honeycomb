@@ -99,3 +99,26 @@ test("follow-up context keeps recent turns and reports shortening and omissions"
   assert.match(records.at(-1).assistant, /handles shutdown/);
   assert.match(followUpPrompt("Why?", context.transcript), /Latest user message:\nWhy\?$/);
 });
+
+test("Freebuff context is saved separately from the user message and included with earlier chat turns", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "honeycomb-freebuff-chat-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const project = { name: "Example", path: directory };
+  const store = createWorkspaceStore(() => join(directory, "workspace.json"));
+  const freebuff = { prompt: "Investigate the tracking pipeline", reply: "The detector emits frame-level results." };
+  const service = createRunService(() => {});
+  const id = service.start(project, { providerId: "opencode", prompt: "Explain this response" }, freebuff);
+  await service.shutdown();
+  await store.save({ folder: project, projects: [project], runs: service.history() });
+
+  const reopened = createRunService(() => {});
+  reopened.restore((await store.load()).runs);
+  const [run] = reopened.conversation(id);
+  assert.equal(run.prompt, "Explain this response");
+  assert.deepEqual(run.freebuffContext, freebuff);
+  const received = followUpPrompt("Which stage?", conversationContext([run]).transcript, run.freebuffContext);
+  assert.match(received, /"user":"Explain this response"/);
+  assert.ok(received.includes(JSON.stringify(freebuff)));
+  assert.match(received, /Latest user message:\nWhich stage\?$/);
+  assert.equal(followUpPrompt("New chat"), "New chat");
+});

@@ -53,6 +53,7 @@ export interface RunWorktree {
 
 /** A worktree record Honeycomb can clean up later. */
 export interface WorktreeRecord extends RunWorktree {
+  freebuffProject?: string;
   repository: string;
   createdAt: string;
 }
@@ -71,6 +72,22 @@ export interface RunDiff {
   files: DiffFile[];
   truncated?: boolean;
 }
+
+export interface FreebuffExchange {
+  prompt?: string;
+  reply: string;
+}
+
+export type FreebuffContext = FreebuffExchange | { transcript: string };
+
+export interface FreebuffAttachment {
+  worktreeId: string;
+  source: "saved" | "export";
+}
+
+export type FreebuffReview =
+  | { available: false }
+  | { available: true; diff: RunDiff; transcriptReady: boolean; savedExchange?: FreebuffExchange };
 
 export type RunEventData =
   | { type: "started" | "stopping" | "message" | "tool_call" | "tool_result" | "notice" | "error"; text: string }
@@ -95,6 +112,7 @@ export interface Run {
   conversationId?: string;
   turnIndex?: number;
   context?: ConversationContextSummary;
+  freebuffContext?: FreebuffContext;
   providerId: ProviderId;
   providerName: string;
   folder?: ProjectFolder;
@@ -116,6 +134,7 @@ export interface StartRunRequest {
   providerId: ProviderId;
   prompt: string;
   conversationId?: string;
+  freebuff?: FreebuffAttachment;
   effort?: string;
   mode?: WorkspaceMode;
   model?: string;
@@ -139,6 +158,10 @@ export interface SidebarMenuRequest {
 }
 
 export interface IpcCalls {
+  "copy-install-command": (command: string) => void;
+  "open-freebuff": (request: { prompt: string; id?: string; replace?: boolean }) => WorktreeRecord;
+  "review-freebuff": (id: string) => FreebuffReview;
+  "copy-freebuff-export": () => void;
   state: () => AppState;
   "inspect-providers": () => Connector[];
   "install-opencode": () => void;
@@ -161,6 +184,10 @@ type Invoke<Channel extends keyof IpcCalls> =
   (...args: Parameters<IpcCalls[Channel]>) => Promise<ReturnType<IpcCalls[Channel]>>;
 
 export interface HoneycombApi {
+  copyInstallCommand: Invoke<"copy-install-command">;
+  openFreebuff: Invoke<"open-freebuff">;
+  reviewFreebuff: Invoke<"review-freebuff">;
+  copyFreebuffExport: Invoke<"copy-freebuff-export">;
   getState: Invoke<"state">;
   inspectProviders: Invoke<"inspect-providers">;
   installOpenCode: Invoke<"install-opencode">;

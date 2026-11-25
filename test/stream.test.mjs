@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { streamCodexChat, streamCodexEdit, streamOpenCodeChat, streamProvider } from "../dist/providers/stream.js";
+import { streamCodexChat, streamCodexEdit, streamOpenCodeChat, streamOpenCodeEdit, streamProvider } from "../dist/providers/stream.js";
 
 const fixture = String.raw`
   const lines = require("node:readline").createInterface({ input: process.stdin });
@@ -42,6 +42,11 @@ const fixture = String.raw`
         const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT);
         if (!config.agents[params.modeId] || !config.policies.some((rule) =>
           rule.action === "tool.use" && rule.resource === "*" && rule.effect === "deny")) process.exit(2);
+      }
+      if (method === "session/set_mode" && process.env.FIXTURE_EDIT === "1" && params.modeId === "honeycomb-edit") {
+        const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT);
+        if (!config.agents[params.modeId] || !config.agents[params.modeId].permissions.some((rule) =>
+          rule.action === "edit" && rule.resource === "*" && rule.effect === "allow")) process.exit(2);
       }
       reply();
     } else if (method === "turn/start" || method === "session/prompt") {
@@ -130,6 +135,16 @@ test("Codex edit turns restrict the write sandbox to the worktree", async () => 
     timeoutMs: 5000, env: { ...process.env, FIXTURE_EDIT: "1" },
   }, "Fix a test", undefined, (event) => events.push(event));
   assert.equal(events.find(({ type }) => type === "message")?.text, "**Live reply**");
+});
+
+test("OpenCode edit sessions use the scoped edit agent", async () => {
+  const events = [];
+  await streamOpenCodeEdit({
+    file: process.execPath, args: ["-e", fixture, "--"], cwd: process.cwd(), timeoutMs: 5000,
+    env: { ...process.env, FIXTURE_EDIT: "1" },
+  }, "Fix it", "provider/model", "2.4.1", (event) => events.push(event));
+  assert.deepEqual(events.slice(0, 2).map((event) => event.type), ["tool_call", "tool_result"]);
+  assert.equal(events.filter(({ type }) => type === "delta").map(({ text }) => text).join(""), "**Live reply**");
 });
 
 test("OpenCode Chat passes slash commands as text and stops an unexpected tool request", async () => {
