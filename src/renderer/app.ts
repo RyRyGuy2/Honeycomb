@@ -1,5 +1,5 @@
 import type {
-  Connector, ConnectorStatus, HoneycombApi, ModelCatalog, ModelSelection, ProjectFolder, ProviderId, Run, RunStatus, RunUsage,
+  Connector, ConnectorStatus, HoneycombApi, ModelCatalog, ModelSelection, ProjectFolder, ProviderId, Run, RunEvent, RunStatus, RunUsage,
 } from "../shared/contracts.js";
 
 declare global {
@@ -70,6 +70,7 @@ let connectors: Connector[] = [
   { id: "opencode", name: "OpenCode", status: "checking" },
 ];
 const runs = new Map<string, Run>();
+const openToolGroups = new Set<string>();
 
 function get(id: string): HTMLElement;
 function get<T extends HTMLElement>(id: string, elementType: new () => T): T;
@@ -209,6 +210,24 @@ function agentReply(author: string, text: string) {
   return article;
 }
 
+function toolActivity(events: RunEvent[], key: string) {
+  const details = element("details", "tool-activity");
+  const summary = element("summary", "", "Tool activity");
+  summary.append(element("span", "tool-count", `${events.length} ${events.length === 1 ? "update" : "updates"}`));
+  const list = element("ol");
+  for (const event of events) {
+    if (event.type === "tool_call" || event.type === "tool_result") list.append(element("li", "", event.text));
+  }
+  details.open = openToolGroups.has(key);
+  details.addEventListener("toggle", () => {
+    if (!details.isConnected) return;
+    if (details.open) openToolGroups.add(key);
+    else openToolGroups.delete(key);
+  });
+  details.append(summary, list);
+  return details;
+}
+
 get("feed").addEventListener("click", (event) => {
   const link = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>("a[href]") : null;
   if (!link) return;
@@ -230,14 +249,27 @@ function renderThread(run: Run | undefined) {
   }
 
   const entries = [feedEntry("You", run.prompt, "user")];
+  let tools: RunEvent[] = [];
+  function flushTools() {
+    const first = tools[0];
+    if (!first) return;
+    entries.push(toolActivity(tools, `${first.runId}:${first.sequence}`));
+    tools = [];
+  }
   for (const event of run.events) {
     if (event.type === "usage") continue;
+    if (event.type === "tool_call" || event.type === "tool_result") {
+      tools.push(event);
+      continue;
+    }
+    flushTools();
     if (event.type === "message") {
       entries.push(agentReply(run.providerName, event.text));
     } else {
       entries.push(element("p", `feed-line ${event.type}`, event.text));
     }
   }
+  flushTools();
   feed.replaceChildren(...entries);
   if (atBottom || run.id !== lastThreadId) thread.scrollTop = thread.scrollHeight;
   lastThreadId = run.id;

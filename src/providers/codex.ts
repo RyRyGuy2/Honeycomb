@@ -55,7 +55,8 @@ export const codex: ProviderAdapter = {
     }
 
     if (event.type === "item.started" && item?.type === "command_execution") {
-      return { event: { type: "tool_call", text: "Codex started a command." } };
+      const command = typeof item.command === "string" ? `\n${item.command.slice(0, 500)}` : "";
+      return { event: { type: "tool_call", text: `Codex started a command.${command}` } };
     }
     if (event.type !== "item.completed") return;
 

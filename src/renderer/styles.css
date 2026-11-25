@@ -489,6 +489,13 @@ main { grid-column: 3; }
 .markdown hr { border: 0; border-top: 1px solid var(--border); }
 .feed-line { padding: 3px 2px; color: var(--muted); line-height: 1.48; overflow-wrap: anywhere; font-size: 12px; }
 .feed-line.error { color: var(--accent-hover); }
+.tool-activity { min-width: 0; color: var(--muted); font-size: 12px; }
+.tool-activity summary { width: fit-content; cursor: pointer; padding: 5px 2px; }
+.tool-activity summary:hover { color: var(--text); }
+.tool-activity summary:focus-visible { outline: 2px solid var(--accent-hover); outline-offset: 2px; }
+.tool-count { margin-inline-start: 8px; color: var(--subtle); }
+.tool-activity ol { padding-inline-start: 25px; margin: 4px 0; }
+.tool-activity li { margin-bottom: 6px; padding-inline-start: 3px; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 .library { overflow: auto; width: min(100%, 980px); margin: 0 auto; padding: 42px 36px; }
 .library-header { margin-bottom: 24px; }

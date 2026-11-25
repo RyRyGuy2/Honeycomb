@@ -99,8 +99,13 @@ export const opencode: ProviderAdapter = {
       return { event: { type: "message", text: part?.text } };
     }
     if (event.type === "tool_use" && typeof part?.tool === "string" && part.tool) {
-      const status = asRecord(part.state)?.status === "error" ? "failed" : "finished";
-      return { event: { type: "tool_result", text: `OpenCode ${part.tool} ${status}.` } };
+      const state = asRecord(part.state);
+      const status = state?.status === "error" ? "failed" : "finished";
+      const input = asRecord(state?.input);
+      const target = [input?.command, input?.filePath, input?.path, input?.pattern]
+        .find((value): value is string => typeof value === "string" && Boolean(value.trim()));
+      const detail = target ? `\n${target.slice(0, 500)}` : "";
+      return { event: { type: "tool_result", text: `OpenCode ${part.tool} ${status}.${detail}` } };
     }
     if (event.type === "step_finish") {
       const tokens = asRecord(part?.tokens);

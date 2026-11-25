@@ -39,7 +39,7 @@ export type FinishedRunStatus = "completed" | "failed" | "cancelled";
 export type RunStatus = "running" | "stopping" | FinishedRunStatus;
 
 export type RunEventData =
-  | { type: "started" | "stopping" | "message" | "tool_call" | "tool_result" | "error"; text: string }
+  | { type: "started" | "stopping" | "message" | "tool_call" | "tool_result" | "notice" | "error"; text: string }
   | { type: "finished"; status: FinishedRunStatus; text: string }
   | ({ type: "usage" } & RunUsage);
 

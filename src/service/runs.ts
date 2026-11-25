@@ -6,7 +6,6 @@ import { asRecord } from "../shared/records.js";
 import { readJsonLines, runProcess } from "./process.js";
 
 const MAX_RUNS = 20;
-const MAX_EVENTS = 100;
 const MAX_PROMPT_LENGTH = 8_000;
 const MAX_MESSAGE_LENGTH = 16_000;
 const TIMEOUT_MS = 5 * 60_000;
@@ -60,7 +59,6 @@ export function createRunService(
 
   function append(run: Run, event: RunEventData) {
     run.events.push({ ...event, runId: run.id, sequence: ++run.revision, at: new Date().toISOString() });
-    if (run.events.length > MAX_EVENTS) run.events.shift();
     publish(run);
   }
 
@@ -120,7 +118,7 @@ export function createRunService(
         onStderr(tail) {
           if (providerNotice || signal.aborted) return;
           providerNotice = provider.diagnoseStderr?.(tail);
-          if (providerNotice) append(run, { type: "tool_result", text: providerNotice });
+          if (providerNotice) append(run, { type: "notice", text: providerNotice });
         },
       });
 
