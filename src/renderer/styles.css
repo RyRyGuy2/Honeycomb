@@ -398,6 +398,10 @@ main { grid-column: 3; }
 .composer textarea::placeholder { color: var(--muted-light); opacity: 1; }
 .composer-actions, .composer-options { display: flex; gap: 9px; align-items: center; }
 .composer-actions { justify-content: space-between; margin-top: 4px; }
+.composer-options { min-width: 0; flex-wrap: wrap; }
+.composer-actions > .button { flex: none; }
+#chat-model-control { min-width: 0; max-width: 100%; }
+.composer-options #chat-model { max-width: min(220px, 100%); text-overflow: ellipsis; }
 .composer-options select {
   max-width: 125px;
   padding: 6px 8px;
@@ -488,7 +492,40 @@ main { grid-column: 3; }
 .connector-monogram.opencode { color: #415640; background: #eaf0e3; border-color: #d3ddcc; }
 .connector-heading .connector-monogram { width: 46px; height: 46px; margin-top: 4px; font-size: 20px; }
 .connector-card { padding: 18px 20px; }
-.connector-card .button { margin-top: 18px; }
+.connector-card > .button { margin-top: 18px; }
+#add-connector[aria-current="true"] { background: var(--amber-light); border-color: #e2c68a; }
+.connector-input {
+  width: min(100%, 390px);
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--strong-border);
+  border-radius: 7px;
+  color: var(--ink);
+  background: var(--white);
+  font: inherit;
+}
+.connector-input:focus-visible { outline: 2px solid #667d55; outline-offset: 3px; }
+.connector-results { display: grid; width: min(100%, 640px); gap: 12px; margin-top: 16px; }
+.connector-result {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--white);
+}
+.connector-result > div { flex: 1; min-width: 0; }
+.connector-result h2 { font-size: 15px; }
+.connector-result .connector-note { margin-top: 4px; }
+.connector-model-settings { border-top: 1px solid var(--border); margin-top: 18px; padding-top: 2px; }
+.model-field { display: grid; gap: 7px; margin: 14px 0; }
+.model-field label { font-weight: 650; }
+.model-field .connector-note { margin-top: 0; }
+.connector-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.connector-actions select { flex: 1 1 200px; }
+#opencode-actions > .connector-note { margin-top: 6px; }
+#connector-action-status:empty { display: none; }
 .connector-facts { display: grid; gap: 10px; font-size: 13px; }
 .connector-facts > div { display: flex; justify-content: space-between; gap: 12px; }
 .connector-facts dt, .connector-note { color: var(--muted); }

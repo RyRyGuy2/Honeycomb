@@ -2,13 +2,25 @@ import { constants } from "node:fs";
 import { access, stat } from "node:fs/promises";
 import { delimiter, isAbsolute, join } from "node:path";
 import { runProcess } from "../service/process.js";
+import type { Connector } from "../shared/contracts.js";
 import { codex } from "./codex.js";
 import { opencode } from "./opencode.js";
+import type { ProviderAdapter } from "./types.js";
 
-export const providers = new Map([
+export const providers = new Map<string, ProviderAdapter>([
   [codex.id, codex],
   [opencode.id, opencode],
 ]);
+
+interface Executable {
+  file: string;
+  args: string[];
+}
+
+interface ProviderCheck {
+  connector: Connector;
+  executable?: Executable;
+}
 
 const WINDOWS = process.platform === "win32";
 const COMMON_ENVIRONMENT = [
@@ -20,15 +32,16 @@ const COMMON_ENVIRONMENT = [
   "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
 ];
 
-export function providerEnvironment(provider) {
-  const env = { NO_COLOR: "1" };
+export function providerEnvironment(provider?: ProviderAdapter): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { NO_COLOR: "1" };
   for (const key of [...COMMON_ENVIRONMENT, ...(provider?.authEnvironment ?? [])]) {
-    if (process.env[key] !== undefined) env[key] = process.env[key];
+    const value = process.env[key];
+    if (value !== undefined) env[key] = value;
   }
   return env;
 }
 
-async function isFile(path, executable = false) {
+async function isFile(path: string, executable = false) {
   try {
     if (!(await stat(path)).isFile()) return false;
     if (executable && !WINDOWS) await access(path, constants.X_OK);
@@ -44,7 +57,7 @@ function pathDirectories() {
     .filter(isAbsolute);
 }
 
-export async function resolveExecutable(provider) {
+export async function resolveExecutable(provider: ProviderAdapter, managedOpenCode?: string): Promise<Executable | null> {
   const override = process.env[provider.override];
   if (override) {
     const native = !WINDOWS || /\.exe$/i.test(override);
@@ -54,28 +67,36 @@ export async function resolveExecutable(provider) {
     throw new Error(`${provider.override} must point to an absolute executable path.`);
   }
 
+  if (provider.id === "opencode" && managedOpenCode && await isFile(managedOpenCode, true)) {
+    return { file: managedOpenCode, args: [] };
+  }
+
   const directories = pathDirectories();
   for (const directory of directories) {
     const file = join(directory, WINDOWS ? `${provider.id}.exe` : provider.id);
     if (await isFile(file, true)) return { file, args: [] };
 
     if (WINDOWS && await isFile(join(directory, `${provider.id}.cmd`))) {
-      // Use the npm package's JS entry point without interpreting the command shim.
-      const launcher = join(directory, "node_modules", ...provider.npmLauncher);
-      if (!(await isFile(launcher))) continue;
-      for (const nodeDirectory of [directory, ...directories]) {
-        const node = join(nodeDirectory, "node.exe");
-        if (await isFile(node)) return { file: node, args: [launcher] };
+      // Use the npm package's entry point without interpreting the command shim.
+      // Packages ship either a native executable or a JS launcher that needs node.
+      for (const parts of provider.npmLaunchers) {
+        const launcher = join(directory, "node_modules", ...parts);
+        if (!(await isFile(launcher))) continue;
+        if (/\.exe$/i.test(launcher)) return { file: launcher, args: [] };
+        for (const nodeDirectory of [directory, ...directories]) {
+          const node = join(nodeDirectory, "node.exe");
+          if (await isFile(node)) return { file: node, args: [launcher] };
+        }
       }
     }
   }
   return null;
 }
 
-export async function checkProvider(provider, signal) {
-  const connector = { id: provider.id, name: provider.name, status: "missing" };
+export async function checkProvider(provider: ProviderAdapter, signal?: AbortSignal, managedOpenCode?: string): Promise<ProviderCheck> {
+  const connector: Connector = { id: provider.id, name: provider.name, status: "missing" };
   try {
-    const executable = await resolveExecutable(provider);
+    const executable = await resolveExecutable(provider, managedOpenCode);
     if (!executable) return { connector };
 
     const result = await runProcess({
@@ -87,23 +108,24 @@ export async function checkProvider(provider, signal) {
     });
     const version = result.output && provider.parseVersion(result.output);
 
-    const detected = { ...connector, status: "detected", version };
     if (result.code !== 0 || !version) {
       return { connector: { ...connector, status: "unavailable", detail: "The CLI did not return a version." } };
     }
+    const detected: Connector = { ...connector, status: "detected", version, managed: executable.file === managedOpenCode };
     const detail = provider.versionIssue?.(version);
     if (detail) {
       return { connector: { ...detected, status: "unavailable", detail } };
     }
     return { connector: detected, executable };
   } catch (error) {
-    return { connector: { ...connector, status: "unavailable", detail: error.message } };
+    const detail = error instanceof Error ? error.message : String(error);
+    return { connector: { ...connector, status: "unavailable", detail } };
   }
 }
 
-export function inspectProviders() {
+export function inspectProviders(managedOpenCode?: string) {
   return Promise.all([...providers.values()].map(async (provider) => {
-    const { connector } = await checkProvider(provider);
+    const { connector } = await checkProvider(provider, undefined, managedOpenCode);
     return connector;
   }));
 }

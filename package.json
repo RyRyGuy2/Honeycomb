@@ -6,14 +6,22 @@
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
-  "main": "src/main/index.js",
+  "main": "dist/main/index.js",
   "scripts": {
-    "start": "electron ."
+    "start": "npm run build && electron .",
+    "build": "tsc && node dist/build/copy-renderer-assets.js",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && node --test"
   },
   "engines": {
     "node": ">=22.12.0"
   },
   "devDependencies": {
-    "electron": "45.5.0"
+    "@types/node": "24.19.2",
+    "electron": "45.5.0",
+    "typescript": "6.0.3"
+  },
+  "dependencies": {
+    "extract-zip": "2.0.1"
   }
 }

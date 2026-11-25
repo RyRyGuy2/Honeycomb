@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Honeycomb</title>
     <link rel="stylesheet" href="./styles.css">
-    <script defer src="./app.js"></script>
+    <script type="module" src="./app.js"></script>
   </head>
   <body>
     <div class="app-rail">
@@ -68,6 +68,9 @@
 
       <aside id="connectors-sidebar" class="sidebar-panel" aria-labelledby="connectors-sidebar-title" hidden>
         <h2 id="connectors-sidebar-title" class="sidebar-title">Connectors</h2>
+        <button type="button" id="add-connector" class="button sidebar-action" aria-controls="connector-catalog">
+          <span aria-hidden="true">+</span> Add connector
+        </button>
         <div class="sidebar-list">
           <button type="button" class="sidebar-item" data-connector="codex" aria-current="true" aria-controls="connector-detail">
             <span class="connector-monogram" aria-hidden="true">C</span>
@@ -124,6 +127,12 @@
                   <option value="codex">Codex</option>
                   <option value="opencode">OpenCode</option>
                 </select>
+                <span id="chat-model-control">
+                  <label class="visually-hidden" for="chat-model">Model</label>
+                  <select id="chat-model" disabled>
+                    <option value="">Codex default</option>
+                  </select>
+                </span>
                 <span class="review-mode">Review mode</span>
               </div>
               <button type="submit" id="run-task" class="button button-primary" disabled>
@@ -161,10 +170,20 @@
     </main>
 
     <main id="connectors" class="library" hidden>
+      <section id="connector-catalog" aria-labelledby="connector-catalog-title" hidden>
+        <div class="library-header">
+          <h1 id="connector-catalog-title">Add connector</h1>
+          <p>Find a coding agent to use in Honeycomb.</p>
+        </div>
+        <label class="visually-hidden" for="connector-search">Search connectors</label>
+        <input id="connector-search" class="connector-input" type="search" placeholder="Search connectors" autocomplete="off">
+        <div id="connector-results" class="connector-results" aria-live="polite"></div>
+      </section>
+      <div id="connector-settings">
       <div class="library-header connector-heading">
         <span id="connector-mark" class="connector-monogram" aria-hidden="true">C</span>
         <div>
-          <h1 id="connector-title">Codex</h1>
+          <h1 id="connector-title" tabindex="-1">Codex</h1>
           <p id="connector-description"></p>
         </div>
       </div>
@@ -181,8 +200,27 @@
         </dl>
         <p id="connector-detail-note" class="connector-note" hidden></p>
         <button type="button" id="use-connector" class="button button-primary" disabled>Use Codex</button>
+        <div class="connector-model-settings">
+          <div class="model-field">
+            <label for="connector-model">Model</label>
+            <div class="connector-actions">
+              <select id="connector-model" class="connector-input" aria-describedby="model-status" disabled>
+                <option value="">Codex default</option>
+              </select>
+              <button type="button" id="refresh-models" class="button">Refresh models</button>
+            </div>
+            <p id="model-status" class="connector-note" role="status"></p>
+          </div>
+        </div>
+        <div id="opencode-actions" hidden>
+          <button type="button" id="download-opencode" class="button" hidden>Download OpenCode</button>
+          <button type="button" id="test-opencode" class="button" disabled>Test model</button>
+          <p class="connector-note">The test sends a short prompt using your selected model.</p>
+        </div>
       </section>
+      <p id="connector-action-status" class="connector-note" role="status"></p>
       <p class="connector-note">Sign in or set a default model in the CLI before running a task.</p>
+      </div>
     </main>
   </body>
 </html>

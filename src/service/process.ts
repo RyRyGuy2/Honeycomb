@@ -1,11 +1,41 @@
 import { spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { join } from "node:path";
+import { asRecord } from "../shared/records.js";
 
 const WINDOWS = process.platform === "win32";
 const MAX_DIAGNOSTIC_LENGTH = 2_000;
 const MAX_EVENT_LENGTH = 512_000;
 
-export function readJsonLines(onEvent) {
+interface StdoutReader {
+  write(chunk: string): void;
+  end(): void;
+}
+
+interface ProcessOptions {
+  file: string;
+  args: readonly string[];
+  cwd?: string;
+  env: NodeJS.ProcessEnv;
+  input?: string;
+  timeoutMs: number;
+  signal?: AbortSignal;
+  stdout?: StdoutReader;
+  onStderr?: (tail: string) => void;
+  outputLimit?: number;
+}
+
+type StopReason = "cancelled" | "timeout";
+
+interface ProcessResult {
+  code: number | null;
+  output: string;
+  stderr: string;
+  stopped?: StopReason;
+  error?: string;
+}
+
+export function readJsonLines(onEvent: (event: Record<string, unknown>) => void): StdoutReader {
   let line = "";
   let skipping = false;
 
@@ -14,13 +44,14 @@ export function readJsonLines(onEvent) {
     line = "";
     if (skipping || !candidate.startsWith("{")) return;
 
-    let event;
+    let value: unknown;
     try {
-      event = JSON.parse(candidate);
+      value = JSON.parse(candidate);
     } catch {
       return;
     }
-    onEvent(event);
+    const event = asRecord(value);
+    if (event) onEvent(event);
   }
 
   return {
@@ -45,7 +76,7 @@ export function readJsonLines(onEvent) {
   };
 }
 
-function terminateTree(child) {
+function terminateTree(child: ChildProcess) {
   if (!child.pid) return;
 
   if (WINDOWS) {
@@ -68,9 +99,11 @@ function terminateTree(child) {
 }
 
 export function runProcess({
-  file, args, cwd, env, input = "", timeoutMs, signal, stdout,
-}) {
-  if (signal?.aborted) return Promise.resolve({ stopped: "cancelled" });
+  file, args, cwd, env, input = "", timeoutMs, signal, stdout, onStderr, outputLimit = MAX_DIAGNOSTIC_LENGTH,
+}: ProcessOptions): Promise<ProcessResult> {
+  if (signal?.aborted) {
+    return Promise.resolve({ code: null, output: "", stderr: "", stopped: "cancelled" });
+  }
 
   return new Promise((resolve) => {
     const child = spawn(file, args, {
@@ -83,10 +116,10 @@ export function runProcess({
     });
     let output = "";
     let stderr = "";
-    let stopped;
-    let error;
+    let stopped: StopReason | undefined;
+    let error: string | undefined;
 
-    function stop(reason) {
+    function stop(reason: StopReason) {
       if (stopped) return;
       stopped = reason;
       terminateTree(child);
@@ -96,12 +129,13 @@ export function runProcess({
     const deadline = setTimeout(() => stop("timeout"), timeoutMs);
     signal?.addEventListener("abort", cancel, { once: true });
 
-    child.stdout.setEncoding("utf8").on("data", (chunk) => {
+    child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
       if (stdout) stdout.write(chunk);
-      else output = (output + chunk).slice(-MAX_DIAGNOSTIC_LENGTH);
+      else output = (output + chunk).slice(-outputLimit);
     });
-    child.stderr.setEncoding("utf8").on("data", (chunk) => {
+    child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
       stderr = (stderr + chunk).slice(-MAX_DIAGNOSTIC_LENGTH);
+      onStderr?.(stderr);
     });
     child.stdin.on("error", () => {
       // The CLI can exit before consuming the prompt. Its exit and stderr report the failure.
