@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { streamClaude } from "../providers/claude.js";
 import { parseCodexModel } from "../providers/codex.js";
 import { checkProvider, providerEnvironment, providers } from "../providers/index.js";
 import { parseEffort, streamCodexChat, streamOpenCodeChat, streamProvider } from "../providers/stream.js";
@@ -124,7 +125,9 @@ export function createRunService(
           if (providerNotice) append(run, { type: "notice", text: providerNotice });
         },
       };
-      if (codexChat) {
+      if (provider.id === "claude") {
+        await streamClaude(transport, run.prompt, { model: options.model, effort, chat: run.mode === "chat" }, receive);
+      } else if (codexChat) {
         await streamCodexChat(transport, run.prompt, chatModel, receive, effort);
       } else if (run.mode === "chat") {
         await streamOpenCodeChat(transport, run.prompt, options.model, connector.version, receive, effort);
