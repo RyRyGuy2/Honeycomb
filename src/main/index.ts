@@ -21,6 +21,7 @@ const RENDERER_ASSETS = new Map<string, readonly [filename: string, contentType:
   ["/", ["index.html", "text/html"]],
   ["/styles.css", ["styles.css", "text/css"]],
   ["/app.js", ["app.js", "text/javascript"]],
+  ["/shared/conversations.js", ["../shared/conversations.js", "text/javascript"]],
   ["/markdown-it.js", ["markdown-it.js", "text/javascript"]],
   ["/honeycomb-logo.svg", ["honeycomb-logo.svg", "image/svg+xml"]],
 ]);
@@ -233,7 +234,8 @@ function registerHandlers() {
       throw new Error("Invalid sidebar action.");
     }
     const project = target === "project" ? projects.find((entry) => entry.path === id) : undefined;
-    const run = target === "chat" ? runs.history().find((entry) => entry.id === id) : undefined;
+    const turns = target === "chat" ? runs.conversation(id) : [];
+    const run = turns[0];
     if (!project && !run) return false;
 
     const label = project ? "Remove project" : "Delete chat";
@@ -241,7 +243,7 @@ function registerHandlers() {
     const chosen = await new Promise<boolean>((resolve) => {
       Menu.buildFromTemplate([{
         label,
-        enabled: run?.status !== "running" && run?.status !== "stopping",
+        enabled: !turns.some((turn) => turn.status === "running" || turn.status === "stopping"),
         click: () => resolve(true),
       }]).popup({
         window,
@@ -256,7 +258,7 @@ function registerHandlers() {
       type: "warning",
       title: label,
       message: project ? `Remove ${project.name} from Honeycomb?` : "Delete this chat?",
-      detail: project ? "The folder, files, and chat history will be kept." : run?.prompt.replace(/\s+/g, " ").slice(0, 160),
+      detail: project ? "The folder, files, and chat history will be kept." : "All messages in this conversation will be deleted.",
       buttons: ["Cancel", project ? "Remove" : "Delete"],
       defaultId: 0,
       cancelId: 0,

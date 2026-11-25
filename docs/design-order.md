@@ -54,3 +54,5 @@ Run history lives in memory. The app reports provider-supplied token counts and 
 ## 5. Project context and more providers
 
 Add historical usage and policy-aware cost limits as provider data becomes reliable. Evaluate Graphify against a representative local project before adding it as a context source. Add more connectors through the same run contract based on access and demand. Grow the workflow editor once the saved format is stable.
+
+**Idea — switch providers mid-chat.** Let users choose a different provider for the next reply in a saved conversation. Show which recent turns will be sent to the new provider before submitting, and label each reply with the provider that produced it.

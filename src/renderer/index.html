@@ -121,9 +121,18 @@
         </div>
 
         <div class="composer-area">
+          <div id="composer-project-bar" class="composer-project-bar" hidden>
+            <span class="folder-icon" aria-hidden="true"></span>
+            <label class="visually-hidden" for="composer-project-picker">Project for this chat</label>
+            <select id="composer-project-picker" class="composer-project-picker"></select>
+            <span id="composer-project" class="composer-project" hidden></span>
+          </div>
           <form id="composer" class="composer">
             <label class="visually-hidden" for="prompt">Task for the agent</label>
-            <textarea id="prompt" rows="3" maxlength="8000" placeholder="Ask about your project…"></textarea>
+            <textarea id="prompt" rows="3" maxlength="8000" aria-describedby="composer-context" placeholder="Ask about your project…"></textarea>
+            <p id="composer-context" class="composer-context">
+              <span id="composer-context-status" title="Earlier prompts, replies, and recorded tool calls may be included in the next message."></span>
+            </p>
             <div class="composer-actions">
               <div class="composer-options">
                 <label class="visually-hidden" for="provider">Connector</label>
@@ -153,7 +162,7 @@
       </section>
 
       <aside class="details" aria-labelledby="details-title">
-        <h2 id="details-title">Run details</h2>
+        <h2 id="details-title">Latest turn</h2>
         <div id="run-details"></div>
       </aside>
     </main>

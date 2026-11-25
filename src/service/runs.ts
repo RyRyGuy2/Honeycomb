@@ -9,6 +9,7 @@ import { parseEffort, streamCodexChat, streamOpenCodeChat, streamProvider } from
 import type { StreamEvent } from "../providers/stream.js";
 import type { ProviderAdapter, ProviderUsageEvent } from "../providers/types.js";
 import type { FinishedRunStatus, ProjectFolder, ProviderId, Run, RunEventData, RunUsage } from "../shared/contracts.js";
+import { compareTurns, conversationContext, conversationId, followUpPrompt, runMode } from "../shared/conversations.js";
 import { asRecord } from "../shared/records.js";
 
 const MAX_PROMPT_LENGTH = 8_000;
@@ -55,6 +56,10 @@ export function createRunService(
   let active: ActiveRun | undefined;
   let closing = false;
 
+  function conversation(id: string) {
+    return history.filter((run) => conversationId(run) === id).sort(compareTurns);
+  }
+
   function append(run: Run, event: RunEventData) {
     run.events.push({ ...event, runId: run.id, sequence: ++run.revision, at: new Date().toISOString() });
     publish(run);
@@ -67,7 +72,7 @@ export function createRunService(
     append(run, { type: "finished", status, text });
   }
 
-  async function execute(run: Run, provider: ProviderAdapter, signal: AbortSignal, effort?: string, chatModel?: string) {
+  async function execute(run: Run, provider: ProviderAdapter, prompt: string, signal: AbortSignal, effort?: string, chatModel?: string) {
     const env = providerEnvironment(provider);
     const codexChat = run.mode === "chat" && provider.id === "codex";
     if (codexChat) {
@@ -126,13 +131,13 @@ export function createRunService(
         },
       };
       if (codexChat) {
-        await streamCodexChat(transport, run.prompt, chatModel, receive, effort);
+        await streamCodexChat(transport, prompt, chatModel, receive, effort);
       } else if (provider.id === "claude") {
-        await streamClaude(transport, run.prompt, { model: options.model, effort, chat: run.mode === "chat" }, receive);
+        await streamClaude(transport, prompt, { model: options.model, effort, chat: run.mode === "chat" }, receive);
       } else if (run.mode === "chat") {
-        await streamOpenCodeChat(transport, run.prompt, options.model, connector.version, receive, effort);
+        await streamOpenCodeChat(transport, prompt, options.model, connector.version, receive, effort);
       } else {
-        await streamProvider(provider.id, transport, run.prompt, options.model, connector.version, receive, effort);
+        await streamProvider(provider.id, transport, prompt, options.model, connector.version, receive, effort);
       }
       if (signal.aborted) return finish(run, "cancelled", "Run stopped.");
       finish(run, "completed", "Run completed.");
@@ -164,17 +169,20 @@ export function createRunService(
     history() {
       return history;
     },
-    async deleteChat(runId: string, save: () => Promise<boolean>) {
-      const index = history.findIndex((run) => run.id === runId);
-      const run = history[index];
-      if (!run) return false;
-      if (run.status === "running" || run.status === "stopping") {
+    conversation,
+    async deleteChat(id: string, save: () => Promise<boolean>) {
+      const turns = conversation(id);
+      if (!turns.length) return false;
+      if (active && conversationId(active.run) === id) {
         throw new Error("Stop the run before deleting this chat.");
       }
-      history.splice(index, 1);
+      for (let index = history.length - 1; index >= 0; index--) {
+        const run = history[index];
+        if (run && conversationId(run) === id) history.splice(index, 1);
+      }
       if (await save()) return true;
 
-      history.push(run);
+      history.push(...turns);
       history.sort((a, b) => b.startedAt.localeCompare(a.startedAt));
       await save();
       throw new Error("Could not save chat history. The chat was kept.");
@@ -196,8 +204,19 @@ export function createRunService(
         throw new Error(`Enter a task of 1 to ${MAX_PROMPT_LENGTH.toLocaleString("en-US")} characters.`);
       }
 
+      const thread = payload?.conversationId;
+      if (thread !== undefined && typeof thread !== "string") throw new Error("Invalid chat.");
+      const turns = thread === undefined ? [] : conversation(thread);
+      const first = turns[0];
+      if (thread !== undefined && !first) throw new Error("This chat is no longer saved.");
+      if (turns.some((turn) => runMode(turn) !== mode || turn.folder?.path !== (mode === "code" ? folder?.path : undefined))) {
+        throw new Error("Open this chat in its original workspace before continuing.");
+      }
+      if (first && turns.some((turn) => turn.providerId !== provider.id)) throw new Error(`Continue this chat with ${first.providerName}.`);
+      const context = first ? conversationContext(turns) : undefined;
       const run: Run = {
         id: randomUUID(),
+        ...(thread === undefined ? {} : { conversationId: thread, turnIndex: turns.length, context: context?.summary }),
         providerId: provider.id,
         providerName: provider.name,
         mode,
@@ -213,7 +232,8 @@ export function createRunService(
       history.unshift(run);
       active = { run, controller };
       append(run, { type: "started", text: `Starting ${provider.name}.` });
-      active.done = execute(run, provider, controller.signal, effort, chatModel);
+      active.done = execute(run, provider, context?.summary.includedTurns ? followUpPrompt(prompt, context.transcript) : prompt,
+        controller.signal, effort, chatModel);
       return run.id;
     },
     stop(runId: string) {

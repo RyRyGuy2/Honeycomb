@@ -51,8 +51,17 @@ export type RunEvent = RunEventData & {
   at: string;
 };
 
+export interface ConversationContextSummary {
+  includedTurns: number;
+  omittedTurns: number;
+  shortenedTurns: number;
+}
+
 export interface Run {
   id: string;
+  conversationId?: string;
+  turnIndex?: number;
+  context?: ConversationContextSummary;
   providerId: ProviderId;
   providerName: string;
   folder?: ProjectFolder;
@@ -69,6 +78,7 @@ export interface Run {
 export interface StartRunRequest {
   providerId: ProviderId;
   prompt: string;
+  conversationId?: string;
   effort?: string;
   mode?: WorkspaceMode;
   model?: string;

@@ -23,6 +23,8 @@ Use Code with trusted local folders. Codex uses its read-only sandbox. OpenCode 
 
 Honeycomb gives each OpenCode review a temporary in-memory database. OpenCode loads its global model settings and saved provider credentials for the run. [OpenCode database setting](https://github.com/anomalyco/opencode/blob/v1.14.20/packages/opencode/src/storage/db.ts#L33-L38)
 
+Open a saved chat to ask a follow-up with the same connector. Honeycomb includes recent prompts, replies, and recorded tool calls from that conversation. The composer shows how many earlier turns are included, shortened, or omitted. Expand **Activity** beneath a reply for the recorded tool calls, results, and errors. Choose **New chat** to start with an empty conversation.
+
 Use the **Model** dropdown in **Chats** or **Connectors**. Honeycomb saves a separate Code choice for Codex, OpenCode and Claude Code. Claude Code offers the `sonnet`, `opus` and `haiku` aliases, which resolve to the latest model in each family. The composer offers thinking levels when the selected model advertises them. OpenCode models come from the local CLI and public catalog. A public OpenCode model must appear in the local list before selection. **Test model** sends a short OpenCode prompt to verify that the selected model can answer. [OpenCode model selection](https://opencode.ai/docs/models/)
 
 Run `npm test` to verify release selection, download integrity, model discovery, and rate-limit handling.

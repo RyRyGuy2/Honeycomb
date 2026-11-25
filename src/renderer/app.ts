@@ -1,7 +1,8 @@
 import type {
-  Connector, ConnectorStatus, HoneycombApi, ModelCatalog, ModelSelection, ProjectFolder, ProviderId, Run, RunEvent, RunStatus, RunUsage,
+  Connector, ConnectorStatus, ConversationContextSummary, HoneycombApi, ModelCatalog, ModelSelection, ProjectFolder, ProviderId, Run, RunStatus, RunUsage,
   SidebarMenuRequest, WorkspaceMode,
 } from "../shared/contracts.js";
+import { compareTurns, conversationContext, conversationId, runMode } from "../shared/conversations.js";
 
 declare global {
   interface Window {
@@ -26,6 +27,7 @@ const connectorModelField = get("connector-model", HTMLSelectElement);
 const runButton = get("run-task", HTMLButtonElement);
 const chatStatus = get("chat-status");
 const modeButtons = document.querySelectorAll<HTMLButtonElement>("[data-mode]");
+const projectPicker = get("composer-project-picker", HTMLSelectElement);
 
 const statusLabels = {
   running: "Running",
@@ -62,16 +64,18 @@ const usd = new Intl.NumberFormat("en-US", {
 });
 
 let folder: ProjectFolder | undefined;
+let newProjectPath: string | undefined;
 let mode: WorkspaceMode = "code";
 let switchingMode = false;
 let codexChatModel = "";
-const drafts = { code: "", chat: "" };
-const lastRunByMode: Partial<Record<WorkspaceMode, string | undefined>> = {};
+const drafts = new Map<string, string>();
+let draftKey: string | undefined;
+const lastChatByMode: Partial<Record<WorkspaceMode, string | undefined>> = {};
 let projects: ProjectFolder[] = [];
 const expandedProjects = new Set<string>();
 const collapsedProjects = new Set<string>();
 let sidebarMenuOpen = false;
-let selectedRunId: string | undefined;
+let selectedChatId: string | undefined;
 let selectedConnectorId: ProviderId = "codex";
 let catalogOpen = false;
 const modelCatalogs: Partial<Record<ProviderId, ModelCatalog>> = {};
@@ -92,7 +96,14 @@ let connectors: Connector[] = [
   { id: "claude", name: "Claude Code", status: "checking" },
 ];
 const runs = new Map<string, Run>();
-const openToolGroups = new Set<string>();
+const openActivity = new Set<string>();
+
+interface ChatSummary {
+  id: string;
+  first: Run;
+  latest: Run;
+  count: number;
+}
 
 function get(id: string): HTMLElement;
 function get<T extends HTMLElement>(id: string, elementType: new () => T): T;
@@ -125,25 +136,47 @@ function showView(name: string) {
   if (name === "chats") renderComposerProvider();
 }
 
-function history() {
-  return [...runs.values()].sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+function chatHistory() {
+  const chats = new Map<string, ChatSummary>();
+  for (const run of runs.values()) {
+    const id = conversationId(run);
+    const chat = chats.get(id);
+    if (chat) {
+      if (compareTurns(run, chat.first) < 0) chat.first = run;
+      if (compareTurns(run, chat.latest) > 0) chat.latest = run;
+      chat.count++;
+    } else {
+      chats.set(id, { id, first: run, latest: run, count: 1 });
+    }
+  }
+  return [...chats.values()].sort((a, b) => b.latest.startedAt.localeCompare(a.latest.startedAt));
+}
+
+function chatTurns(id = selectedChatId) {
+  if (!id) return [];
+  return [...runs.values()].filter((run) => conversationId(run) === id).sort(compareTurns);
 }
 
 function remember(run: Run) {
-  if ((runs.get(run.id)?.revision ?? -1) >= run.revision) return;
+  if ((runs.get(run.id)?.revision ?? -1) >= run.revision) return false;
   runs.set(run.id, run);
+  return true;
 }
 
 function activeRun() {
   return [...runs.values()].find((run) => run.status === "running" || run.status === "stopping");
 }
 
-function projectRuns(path = folder?.path) {
-  return path ? history().filter((run) => run.folder?.path === path) : [];
+function projectChats(path = folder?.path, chats = chatHistory()) {
+  return path ? chats.filter(({ first }) => runMode(first) === "code" && first.folder?.path === path) : [];
 }
 
-function generalChats() {
-  return history().filter((run) => run.mode === "chat");
+function generalChats(chats = chatHistory()) {
+  return chats.filter(({ first }) => runMode(first) === "chat");
+}
+
+function recentChatId() {
+  return (mode === "chat" ? generalChats() : projectChats())[0]?.id;
 }
 
 function statusDot(status: ConnectorStatus | RunStatus) {
@@ -167,18 +200,24 @@ function renderControls() {
   const provider = connectors.find((connector) => connector.id === providerId);
   const saving = pendingModel?.providerId === providerId;
   const modelPending = Boolean(modelRequests[providerId]) || saving;
+  const needsProject = mode === "code" && (!folder || (!selectedChatId && newProjectPath !== folder.path));
+  providerField.disabled = Boolean(selectedChatId) || busy;
+  projectPicker.disabled = choosing || busy;
+  for (const button of document.querySelectorAll<HTMLButtonElement>(".project-new-chat")) {
+    button.disabled = choosing || busy;
+  }
   get("choose-folder", HTMLButtonElement).disabled = choosing || busy;
   get("new-task", HTMLButtonElement).disabled = choosing || busy;
   for (const button of modeButtons) button.disabled = choosing || busy;
   stop.hidden = !active;
   stop.disabled = active?.status === "stopping";
   stop.textContent = stop.disabled ? "Stopping…" : "Stop run";
-  runButton.disabled = (mode === "code" && !folder) || busy || choosing || modelPending ||
+  runButton.disabled = needsProject || busy || choosing || modelPending ||
     !promptField.value.trim() || provider?.status !== "detected";
   chatStatus.dataset.error = String(Boolean(actionError));
 
   let message = actionError;
-  if (!message && mode === "code" && !folder) message = "Choose a project folder to run a task.";
+  if (!message && needsProject) message = "Choose a project above to start a Code chat.";
   if (!message && active) message = `${active.providerName} is ${statusLabels[active.status].toLowerCase()}.`;
   if (!message && provider?.status === "checking") message = `Checking for ${provider.name}…`;
   if (!message && provider?.status !== "detected") message = `${provider?.name ?? "The connector"} is unavailable. See Connectors for details.`;
@@ -202,18 +241,29 @@ function renderComposerProvider() {
   renderControls();
 }
 
-async function openProject(project: ProjectFolder, runId?: string) {
-  if (mode !== "code" || choosing || starting || switchingMode) return;
+async function selectWorkspaceProject(
+  select: () => Promise<ProjectFolder | undefined>,
+  { register = false, startNew = false, chatId }: { register?: boolean; startNew?: boolean; chatId?: string } = {},
+) {
+  if (mode !== "code" || choosing || starting || switchingMode) return false;
   choosing = true;
   actionError = "";
   renderControls();
   try {
-    const selection = await api.selectProject(project.path);
-    if (!projects.some((entry) => entry.path === selection.path)) return;
+    const selection = await select();
+    if (!selection) return false;
+    if (!projects.some((entry) => entry.path === selection.path)) {
+      if (!register) return false;
+      projects.push(selection);
+    }
+    const keepChat = register && !startNew && folder?.path === selection.path;
     folder = selection;
-    selectedRunId = runId && runs.has(runId) ? runId : projectRuns()[0]?.id;
+    if (!keepChat) selectedChatId = startNew ? undefined : chatId && chatTurns(chatId).length ? chatId : projectChats()[0]?.id;
+    newProjectPath = selectedChatId ? undefined : selection.path;
+    return true;
   } catch (error) {
     showError(error);
+    return false;
   } finally {
     choosing = false;
     renderChats();
@@ -231,17 +281,25 @@ async function showSidebarMenu(request: SidebarMenuRequest, button: HTMLButtonEl
       projects = projects.filter((project) => project.path !== id);
       expandedProjects.delete(id);
       collapsedProjects.delete(id);
-      const lastCodeRun = lastRunByMode.code;
-      if (lastCodeRun && runs.get(lastCodeRun)?.folder?.path === id) delete lastRunByMode.code;
+      const lastCodeChat = lastChatByMode.code;
+      if (lastCodeChat && chatTurns(lastCodeChat)[0]?.folder?.path === id) delete lastChatByMode.code;
       if (folder?.path === id) {
         folder = undefined;
-        if (mode === "code") selectedRunId = undefined;
+        newProjectPath = undefined;
+        if (mode === "code") selectedChatId = undefined;
       }
     } else {
-      const chatMode = runs.get(id)?.mode ?? "code";
-      runs.delete(id);
-      if (lastRunByMode[chatMode] === id) delete lastRunByMode[chatMode];
-      if (selectedRunId === id) selectedRunId = (mode === "chat" ? generalChats() : projectRuns())[0]?.id;
+      for (const turn of chatTurns(id)) {
+        runs.delete(turn.id);
+        openActivity.delete(turn.id);
+      }
+      if (lastChatByMode.chat === id) delete lastChatByMode.chat;
+      if (lastChatByMode.code === id) delete lastChatByMode.code;
+      if (selectedChatId === id) {
+        selectedChatId = recentChatId();
+        draftKey = undefined;
+      }
+      drafts.delete(`chat:${id}`);
     }
     actionError = "";
     const restoreFocus = button === document.activeElement || document.activeElement === document.body;
@@ -271,26 +329,27 @@ function bindSidebarMenu(button: HTMLButtonElement, target: SidebarMenuRequest["
   });
 }
 
-function historyButton(run: Run, select: () => void) {
+function historyButton({ id, first, latest, count }: ChatSummary, select: () => void) {
   const button = element("button", "history-item");
-  const name = run.prompt.replace(/\s+/g, " ");
+  const name = first.prompt.replace(/\s+/g, " ");
   button.type = "button";
-  button.title = run.prompt;
-  if (run.id === selectedRunId) button.setAttribute("aria-current", "true");
+  button.title = first.prompt;
+  if (id === selectedChatId) button.setAttribute("aria-current", "true");
   button.append(
     element("span", "history-name", name),
-    element("span", "history-meta", `${run.providerName} · ${statusLabels[run.status]}`),
+    element("span", "history-meta", `${first.providerName} · ${count} ${count === 1 ? "turn" : "turns"} · ${statusLabels[latest.status]}`),
   );
   button.addEventListener("click", select);
-  bindSidebarMenu(button, "chat", run.id);
+  bindSidebarMenu(button, "chat", id);
   return button;
 }
 
 function renderSidebar() {
   const list = get("run-list");
+  const allChats = chatHistory();
   if (mode === "chat") {
-    const chats = generalChats();
-    list.replaceChildren(...(chats.length ? chats.map((run) => historyButton(run, () => selectRun(run.id)))
+    const chats = generalChats(allChats);
+    list.replaceChildren(...(chats.length ? chats.map((chat) => historyButton(chat, () => selectChat(chat.id)))
       : [element("p", "", "No chats yet.")]));
     return;
   }
@@ -302,14 +361,14 @@ function renderSidebar() {
     title.title = project.path;
     title.append(element("span", "folder-icon"), element("span", "history-name", project.name));
     if (project.path === folder?.path) title.setAttribute("aria-current", "true");
-    title.addEventListener("click", () => void openProject(project));
+    title.addEventListener("click", () => void selectWorkspaceProject(() => api.selectProject(project.path)));
     bindSidebarMenu(title, "project", project.path);
-    const chats = projectRuns(project.path);
+    const chats = projectChats(project.path, allChats);
     const expanded = expandedProjects.has(project.path);
     const chatList = element("div", "project-chats");
     chatList.id = `project-chats-${index}`;
-    for (const run of expanded ? chats : chats.slice(0, 3)) {
-      chatList.append(historyButton(run, () => void openProject(project, run.id)));
+    for (const chat of expanded ? chats : chats.slice(0, 3)) {
+      chatList.append(historyButton(chat, () => void selectWorkspaceProject(() => api.selectProject(project.path), { chatId: chat.id })));
     }
     if (chats.length > 3) {
       const toggle = element("button", "history-item history-more", expanded ? "Show less" : "...");
@@ -324,6 +383,14 @@ function renderSidebar() {
       chatList.append(toggle);
     }
     header.append(title);
+    const newChat = element("button", "sidebar-action-button project-new-chat", "+");
+    newChat.type = "button";
+    newChat.title = `New chat in ${project.name}`;
+    newChat.setAttribute("aria-label", newChat.title);
+    newChat.addEventListener("click", async () => {
+      if (await selectWorkspaceProject(() => api.selectProject(project.path), { startNew: true })) promptField.focus();
+    });
+    header.append(newChat);
     if (chats.length) {
       const disclosure = element("button", "sidebar-action-button project-disclosure");
       disclosure.type = "button";
@@ -363,19 +430,42 @@ function agentReply(author: string, text: string) {
   return article;
 }
 
-function toolActivity(events: RunEvent[], key: string) {
+function countLabel(count: number, label: string) {
+  return `${count} ${label}${count === 1 ? "" : "s"}`;
+}
+
+function contextLabel(summary: ConversationContextSummary) {
+  const included = `${countLabel(summary.includedTurns, "earlier turn")} included`;
+  const limits = [];
+  if (summary.shortenedTurns) limits.push(`${summary.shortenedTurns} shortened`);
+  if (summary.omittedTurns) limits.push(`${summary.omittedTurns} omitted`);
+  return limits.length ? `${included} (${limits.join(", ")})` : included;
+}
+
+function runActivity(run: Run) {
   const details = element("details", "tool-activity");
-  const summary = element("summary", "", "Tool activity");
-  summary.append(element("span", "tool-count", `${events.length} ${events.length === 1 ? "update" : "updates"}`));
+  const summary = element("summary", "", "Activity");
+  const toolCalls = run.events.filter((event) => event.type === "tool_call").length;
+  const errors = run.events.filter((event) => event.type === "error").length;
+  const highlights = [statusLabels[run.status]];
+  if (toolCalls) highlights.push(countLabel(toolCalls, "tool call"));
+  if (errors) highlights.push(countLabel(errors, "error"));
+  summary.append(element("span", "tool-count", highlights.join(" · ")));
   const list = element("ol");
-  for (const event of events) {
-    if (event.type === "tool_call" || event.type === "tool_result") list.append(element("li", "", event.text));
+  if (run.context) list.append(element("li", "", `Conversation context · ${contextLabel(run.context)}`));
+  for (const event of run.events) {
+    if (event.type === "message" || event.type === "usage") continue;
+    const time = element("time", "activity-time", new Date(event.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" }));
+    time.dateTime = event.at;
+    const entry = element("li", event.type === "error" ? "activity-error" : "");
+    entry.append(time, document.createTextNode(event.text));
+    list.append(entry);
   }
-  details.open = openToolGroups.has(key);
+  details.open = openActivity.has(run.id);
   details.addEventListener("toggle", () => {
     if (!details.isConnected) return;
-    if (details.open) openToolGroups.add(key);
-    else openToolGroups.delete(key);
+    if (details.open) openActivity.add(run.id);
+    else openActivity.delete(run.id);
   });
   details.append(summary, list);
   return details;
@@ -388,44 +478,37 @@ get("feed").addEventListener("click", (event) => {
   if (/^https?:$/.test(link.protocol)) void api.openReplyLink(link.href).catch(showError);
 });
 
-function renderThread(run: Run | undefined) {
+function renderThread(turns: readonly Run[]) {
   const thread = get("thread");
   const feed = get("feed");
   const atBottom = thread.scrollHeight - thread.scrollTop - thread.clientHeight < 55;
-  get("welcome").hidden = Boolean(run);
-  feed.hidden = !run;
+  get("welcome").hidden = Boolean(turns.length);
+  feed.hidden = !turns.length;
+  const switched = lastThreadId !== selectedChatId;
+  if (switched || !turns.length) feed.replaceChildren();
 
-  if (!run) {
-    lastThreadId = undefined;
-    feed.replaceChildren();
-    return;
-  }
-
-  const entries = [feedEntry("You", run.prompt, "user")];
-  let tools: RunEvent[] = [];
-  function flushTools() {
-    const first = tools[0];
-    if (!first) return;
-    entries.push(toolActivity(tools, `${first.runId}:${first.sequence}`));
-    tools = [];
-  }
-  for (const event of run.events) {
-    if (event.type === "usage") continue;
-    if (event.type === "tool_call" || event.type === "tool_result") {
-      tools.push(event);
-      continue;
+  for (const [index, run] of turns.entries()) {
+    const existing = feed.children[index];
+    if (existing instanceof HTMLElement && existing.dataset.runId === run.id && existing.dataset.revision === String(run.revision)) continue;
+    const turn = element("section", "conversation-turn");
+    turn.setAttribute("aria-label", `Turn ${index + 1}`);
+    turn.dataset.runId = run.id;
+    turn.dataset.revision = String(run.revision);
+    turn.append(feedEntry("You", run.prompt, "user"));
+    for (const event of run.events) {
+      if (event.type === "message") turn.append(agentReply(run.providerName, event.text));
     }
-    flushTools();
-    if (event.type === "message") {
-      entries.push(agentReply(run.providerName, event.text));
+    turn.append(runActivity(run));
+    if (existing) {
+      const restoreFocus = existing.contains(document.activeElement);
+      existing.replaceWith(turn);
+      if (restoreFocus) turn.querySelector("summary")?.focus({ preventScroll: true });
     } else {
-      entries.push(element("p", `feed-line ${event.type}`, event.text));
+      feed.append(turn);
     }
   }
-  flushTools();
-  feed.replaceChildren(...entries);
-  if (atBottom || run.id !== lastThreadId) thread.scrollTop = thread.scrollHeight;
-  lastThreadId = run.id;
+  if (atBottom || switched) thread.scrollTop = thread.scrollHeight;
+  lastThreadId = selectedChatId;
 }
 
 function facts(items: ReadonlyArray<readonly [label: string, value: string]>) {
@@ -468,19 +551,65 @@ function renderDetails(run: Run | undefined) {
   );
 }
 
-function renderChats() {
-  const run = selectedRunId ? runs.get(selectedRunId) : undefined;
-  const title = get("chat-title");
-  title.textContent = run?.prompt.replace(/\s+/g, " ") ?? (mode === "chat" ? "New chat" : "New task");
-  title.title = run ? title.textContent : "";
-  renderSidebar();
-  renderThread(run);
-  renderDetails(run);
-  renderControls();
+function renderComposerProject(first: Run | undefined) {
+  get("composer-project-bar").hidden = mode !== "code";
+  if (mode !== "code") return;
+  const project = first?.folder;
+  const projectLabel = get("composer-project");
+  projectLabel.hidden = !project;
+  projectLabel.textContent = project?.name ?? "";
+  projectLabel.title = project?.path ?? "";
+  projectPicker.hidden = Boolean(project);
+  if (project) return;
+
+  const placeholder = element("option", "", "Choose a project");
+  placeholder.value = "";
+  placeholder.disabled = true;
+  const saved = projects.map((entry) => {
+    const duplicateName = projects.some((other) => other !== entry && other.name === entry.name);
+    const option = element("option", "", duplicateName ? entry.path : entry.name);
+    option.value = entry.path;
+    return option;
+  });
+  const browse = element("option", "", "Browse for a folder…");
+  browse.dataset.browse = "true";
+  projectPicker.replaceChildren(placeholder, ...saved, browse);
+  projectPicker.value = newProjectPath ?? "";
+  projectPicker.title = newProjectPath ?? "";
 }
 
-function selectRun(id: string | undefined) {
-  selectedRunId = id;
+function renderChats() {
+  const turns = chatTurns();
+  const first = turns[0];
+  const contextTurns = turns.filter((turn) => turn.status !== "running" && turn.status !== "stopping");
+  renderComposerProject(first);
+  get("composer-context-status").textContent = contextTurns.length
+    ? contextLabel(conversationContext(contextTurns).summary)
+    : "New conversation";
+  const key = selectedChatId ? `chat:${selectedChatId}` : `new:${mode}`;
+  if (key !== draftKey) {
+    if (draftKey) drafts.set(draftKey, promptField.value);
+    promptField.value = drafts.get(key) ?? "";
+    draftKey = key;
+  }
+  const providerChanged = first && providerField.value !== first.providerId;
+  if (providerChanged) providerField.value = first.providerId;
+  const continueChat = Boolean(first);
+  get("send-label").textContent = continueChat || mode === "chat" ? "Send" : "Run task";
+  promptField.placeholder = continueChat ? "Ask a follow-up…" : mode === "chat" ? "Ask a question…" : "Ask about your project…";
+  const title = get("chat-title");
+  title.textContent = first?.prompt.replace(/\s+/g, " ") ?? (mode === "chat" ? "New chat" : "New task");
+  title.title = first ? title.textContent : "";
+  renderSidebar();
+  renderThread(turns);
+  renderDetails(turns.at(-1));
+  if (providerChanged) renderComposerProvider();
+  else renderControls();
+}
+
+function selectChat(id: string | undefined) {
+  if (starting) return;
+  selectedChatId = id;
   renderChats();
 }
 
@@ -493,10 +622,8 @@ function renderWorkspaceMode() {
   get("welcome-title").textContent = chat ? "Ask a question" : "Start a review run";
   get("welcome-description").textContent = chat ? "Choose a model and start a conversation." : "Choose a project and ask Codex, OpenCode or Claude Code to investigate.";
   get("prompt-ideas").hidden = chat;
-  get("send-label").textContent = chat ? "Send" : "Run task";
-  promptField.placeholder = chat ? "Ask a question…" : "Ask about your project…";
-  renderComposerProvider();
   renderChats();
+  renderComposerProvider();
 }
 
 async function switchMode(next: WorkspaceMode) {
@@ -505,12 +632,9 @@ async function switchMode(next: WorkspaceMode) {
   renderControls();
   try {
     await api.setMode(next);
-    drafts[mode] = promptField.value;
-    lastRunByMode[mode] = selectedRunId;
+    lastChatByMode[mode] = selectedChatId;
     mode = next;
-    promptField.value = drafts[mode];
-    selectedRunId = Object.hasOwn(lastRunByMode, mode) ? lastRunByMode[mode]
-      : (mode === "chat" ? generalChats() : projectRuns())[0]?.id;
+    selectedChatId = Object.hasOwn(lastChatByMode, mode) ? lastChatByMode[mode] : recentChatId();
     actionError = "";
     renderWorkspaceMode();
   } catch (error) {
@@ -862,28 +986,21 @@ get("stop-run").addEventListener("click", async () => {
 });
 get("new-task").addEventListener("click", () => {
   actionError = "";
-  selectRun(undefined);
-  promptField.focus();
+  if (mode === "code") newProjectPath = undefined;
+  selectChat(undefined);
+  (mode === "code" ? projectPicker : promptField).focus();
 });
 
-get("choose-folder").addEventListener("click", async () => {
-  if (mode !== "code") return;
-  choosing = true;
-  actionError = "";
-  renderControls();
-  try {
-    const selection = await api.chooseFolder();
-    if (selection && selection.path !== folder?.path) {
-      if (!projects.some((project) => project.path === selection.path)) projects.push(selection);
-      folder = selection;
-      selectedRunId = projectRuns()[0]?.id;
-    }
-  } catch (error) {
-    showError(error);
-  } finally {
-    choosing = false;
-    renderChats();
+get("choose-folder").addEventListener("click", () => void selectWorkspaceProject(() => api.chooseFolder(), { register: true }));
+
+projectPicker.addEventListener("change", async () => {
+  if (projectPicker.selectedOptions[0]?.dataset.browse) {
+    if (await selectWorkspaceProject(() => api.chooseFolder(), { register: true, startNew: true })) promptField.focus();
+    else projectPicker.focus();
+    return;
   }
+  const path = projectPicker.value;
+  if (path && await selectWorkspaceProject(() => api.selectProject(path), { startNew: true })) promptField.focus();
 });
 
 for (const example of document.querySelectorAll<HTMLButtonElement>("[data-prompt]")) {
@@ -914,14 +1031,17 @@ get("composer").addEventListener("submit", async (event) => {
   const connector = connectors.find((entry) => entry.id === providerField.value);
   if (!connector || runButton.disabled) return;
   const draft = promptField.value;
+  const chatId = selectedChatId;
   starting = true;
   actionError = "";
   renderControls();
   try {
-    selectedRunId = await api.startRun({
-      providerId: connector.id, prompt: draft, effort: thinkingField.value, model: chatModelField.value,
+    const runId = await api.startRun({
+      providerId: connector.id, conversationId: chatId, prompt: draft, effort: thinkingField.value, model: chatModelField.value,
     });
     if (promptField.value === draft) promptField.value = "";
+    selectedChatId = chatId ?? runId;
+    if (mode === "code") newProjectPath = undefined;
   } catch (error) {
     showError(error);
   } finally {
@@ -932,16 +1052,14 @@ get("composer").addEventListener("submit", async (event) => {
 
 api.onRunChanged((run) => {
   const previous = runs.get(run.id);
-  remember(run);
+  if (!remember(run)) return;
   if (previous?.status === run.status) {
-    if (selectedRunId === run.id && previous.revision < run.revision) {
-      renderThread(run);
+    if (selectedChatId === conversationId(run)) {
+      renderThread(chatTurns());
       renderDetails(run);
     }
     return;
   }
-  const inMode = run.mode === "chat" ? mode === "chat" : mode === "code" && run.folder?.path === folder?.path;
-  if (run.revision === 1 && inMode) selectedRunId = run.id;
   renderChats();
 });
 
@@ -952,6 +1070,6 @@ api.getState().then((state) => {
   projects = state.projects;
   mode = state.mode === "chat" ? "chat" : "code";
   for (const run of state.runs) remember(run);
-  selectedRunId ??= (mode === "chat" ? generalChats() : projectRuns())[0]?.id;
+  selectedChatId ??= recentChatId();
   renderWorkspaceMode();
 }).catch(showError);
