@@ -2,7 +2,6 @@ import { app, BrowserWindow, dialog, ipcMain, nativeTheme, protocol, session, sh
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { listCodexChatModels } from "../providers/codex-chat.js";
 import { listCodexModels } from "../providers/codex-models.js";
 import { parseCodexModel } from "../providers/codex.js";
 import { inspectProviders, providerEnvironment } from "../providers/index.js";
@@ -16,16 +15,19 @@ import type { IpcCalls, ProjectFolder, ProviderId, WorkspaceMode } from "../shar
 import { asRecord } from "../shared/records.js";
 
 const APP_URL = "honeycomb://app/";
+const APP_ICON = fileURLToPath(new URL("./honeycomb-icon.png", import.meta.url));
 const RENDERER_ASSETS = new Map<string, readonly [filename: string, contentType: string]>([
   ["/", ["index.html", "text/html"]],
   ["/styles.css", ["styles.css", "text/css"]],
   ["/app.js", ["app.js", "text/javascript"]],
   ["/markdown-it.js", ["markdown-it.js", "text/javascript"]],
+  ["/honeycomb-logo.svg", ["honeycomb-logo.svg", "image/svg+xml"]],
 ]);
 const CONTENT_POLICY = [
   "default-src 'none'",
   "script-src 'self'",
   "style-src 'self'",
+  "img-src 'self'",
   "base-uri 'none'",
   "form-action 'none'",
   "frame-ancestors 'none'",
@@ -143,7 +145,6 @@ function registerHandlers() {
   });
   handle("list-opencode-efforts", (value) =>
     trackConnectorJob(listOpenCodeEfforts(getOpenCodePath(), parseOpenCodeModel(value), connectorAbort.signal)));
-  handle("list-codex-chat-models", () => trackConnectorJob(listCodexChatModels(connectorAbort.signal)));
   handle("set-model", (value) => {
     const payload = asRecord(value);
     const providerId = requireProviderId(payload?.providerId);
@@ -205,6 +206,7 @@ function registerHandlers() {
 function createWindow() {
   const window = new BrowserWindow({
     title: "Honeycomb",
+    icon: APP_ICON,
     width: 1240,
     height: 820,
     minWidth: 770,
@@ -230,6 +232,7 @@ function createWindow() {
 
 app.whenReady().then(async () => {
   nativeTheme.themeSource = "dark";
+  app.dock?.setIcon(APP_ICON);
   const saved = await workspace.load();
   if (saved) {
     projects = saved.projects;

@@ -57,8 +57,7 @@ const usd = new Intl.NumberFormat("en-US", {
 let folder: ProjectFolder | undefined;
 let mode: WorkspaceMode = "code";
 let switchingMode = false;
-let codexChatCatalog: ModelCatalog | undefined;
-let loadingCodexChatModels = false;
+let codexChatModel = "";
 const drafts = { code: "", chat: "" };
 const lastRunByMode: Partial<Record<WorkspaceMode, string | undefined>> = {};
 let projects: ProjectFolder[] = [];
@@ -157,8 +156,7 @@ function renderControls() {
   const providerId = chatProviderId();
   const provider = connectors.find((connector) => connector.id === providerId);
   const saving = pendingModel?.providerId === providerId;
-  const codexChat = mode === "chat" && providerId === "codex";
-  const modelPending = codexChat ? loadingCodexChatModels : Boolean(modelRequests[providerId]) || saving;
+  const modelPending = Boolean(modelRequests[providerId]) || saving;
   get("choose-folder", HTMLButtonElement).disabled = choosing || busy;
   get("new-task", HTMLButtonElement).disabled = choosing || busy;
   for (const button of modeButtons) button.disabled = choosing || busy;
@@ -166,16 +164,15 @@ function renderControls() {
   stop.disabled = active?.status === "stopping";
   stop.textContent = stop.disabled ? "Stopping…" : "Stop run";
   runButton.disabled = (mode === "code" && !folder) || busy || choosing || modelPending ||
-    !promptField.value.trim() || (!codexChat && provider?.status !== "detected");
+    !promptField.value.trim() || provider?.status !== "detected";
   chatStatus.dataset.error = String(Boolean(actionError));
 
   let message = actionError;
   if (!message && mode === "code" && !folder) message = "Choose a project folder to run a task.";
   if (!message && active) message = `${active.providerName} is ${statusLabels[active.status].toLowerCase()}.`;
-  if (!message && !codexChat && provider?.status === "checking") message = `Checking for ${provider.name}…`;
-  if (!message && !codexChat && provider?.status !== "detected") message = `${provider?.name ?? "The connector"} is unavailable. See Connectors for details.`;
+  if (!message && provider?.status === "checking") message = `Checking for ${provider.name}…`;
+  if (!message && provider?.status !== "detected") message = `${provider?.name ?? "The connector"} is unavailable. See Connectors for details.`;
   if (!message && modelPending) message = saving ? `Saving ${provider?.name} model…` : `Loading ${provider?.name} models…`;
-  if (!message && codexChat && codexChatCatalog?.localError) message = codexChatCatalog.localError;
   if (chatStatus.textContent !== message) chatStatus.textContent = message;
 }
 
@@ -185,20 +182,7 @@ function chatProviderId(): ProviderId {
 
 function renderComposerProvider() {
   const providerId = chatProviderId();
-  if (mode === "chat" && providerId === "codex") {
-    if (!codexChatCatalog && !loadingCodexChatModels) {
-      loadingCodexChatModels = true;
-      void api.listCodexChatModels().then((catalog) => {
-        codexChatCatalog = catalog;
-      }).catch(() => {
-        codexChatCatalog = { models: [], selected: "", localError: "Could not load OpenAI models." };
-      }).finally(() => {
-        loadingCodexChatModels = false;
-        renderModels();
-        renderControls();
-      });
-    }
-  } else if (!get("chats").hidden && !modelCatalogs[providerId] &&
+  if (!get("chats").hidden && !modelCatalogs[providerId] &&
       connectors.some((connector) => connector.id === providerId && connector.status === "detected")) {
     void refreshModels(providerId);
   }
@@ -549,10 +533,10 @@ function shortModelName(model: ModelCatalog["models"][number]) {
 
 function renderModelPicker(select: HTMLSelectElement, providerId: ProviderId) {
   const codexChat = select === chatModelField && mode === "chat" && providerId === "codex";
-  const catalog = codexChat ? codexChatCatalog : modelCatalogs[providerId];
-  const loading = codexChat ? loadingCodexChatModels : Boolean(modelRequests[providerId]);
+  const catalog = modelCatalogs[providerId];
+  const loading = Boolean(modelRequests[providerId]);
   const providerName = providerId === "codex" ? "Codex" : "OpenCode";
-  const fallback = element("option", "", loading && !catalog ? "Loading models…" : codexChat ? "GPT-5 mini" : `${providerName} default`);
+  const fallback = element("option", "", loading && !catalog ? "Loading models…" : `${providerName} default`);
   fallback.value = "";
   const local = element("optgroup");
   local.label = `Listed by ${providerName}`;
@@ -565,7 +549,7 @@ function renderModelPicker(select: HTMLSelectElement, providerId: ProviderId) {
     option.disabled = !model.available;
     (model.available ? local : online).append(option);
   }
-  const selected = (!codexChat && pendingModel?.providerId === providerId ? pendingModel.model : catalog?.selected) ?? "";
+  const selected = (codexChat ? codexChatModel : pendingModel?.providerId === providerId ? pendingModel.model : catalog?.selected) ?? "";
   if (selected && !catalog?.models.some((model) => model.id === selected && model.available)) {
     const saved = element("option", "", select === chatModelField ? selected.split("/").pop() : `${selected} (saved selection)`);
     saved.value = selected;
@@ -588,7 +572,7 @@ function renderThinking(providerId: ProviderId) {
   const modelId = chatModelField.value;
   const codexChat = mode === "chat" && providerId === "codex";
   const key = (codexChat ? "chat-codex" : providerId) + ":" + modelId;
-  const catalog = codexChat ? codexChatCatalog : modelCatalogs[providerId];
+  const catalog = modelCatalogs[providerId];
   const model = catalog?.models.find((entry) => entry.id === modelId);
   if (providerId === "opencode" && catalog && !effortChoices.has(key) && !effortRequests.has(key)) {
     effortRequests.add(key);
@@ -603,7 +587,7 @@ function renderThinking(providerId: ProviderId) {
       }
     });
   }
-  const choices = providerId === "codex" ? model?.efforts ?? catalog?.defaultEfforts ?? [] : effortChoices.get(key) ?? [];
+  const choices = providerId === "codex" ? model?.efforts ?? [] : effortChoices.get(key) ?? [];
   const saved = selectedEfforts.get(key) ?? "";
   const selected = choices.includes(saved) ? saved : "";
   const current = selected || model?.defaultEffort || "";
@@ -684,7 +668,7 @@ async function saveModel(picker: HTMLSelectElement) {
   const fromChat = picker === chatModelField;
   const providerId = fromChat ? chatProviderId() : selectedConnectorId;
   if (fromChat && mode === "chat" && providerId === "codex") {
-    if (codexChatCatalog) codexChatCatalog.selected = picker.value;
+    codexChatModel = picker.value;
     actionError = "";
     renderControls();
     return;

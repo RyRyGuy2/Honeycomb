@@ -15,7 +15,6 @@ export interface Connector {
 export interface ModelCatalog {
   models: Array<{ id: string; name: string; available: boolean; online: boolean; efforts?: string[]; defaultEffort?: string }>;
   selected: string;
-  defaultEfforts?: string[];
   localError?: string;
   onlineError?: string;
 }
@@ -86,7 +85,6 @@ export interface IpcCalls {
   "inspect-providers": () => Connector[];
   "install-opencode": () => void;
   "list-models": (providerId: ProviderId) => ModelCatalog;
-  "list-codex-chat-models": () => ModelCatalog;
   "list-opencode-efforts": (model: string) => string[];
   "set-model": (selection: ModelSelection) => void;
   "test-opencode": () => void;
@@ -106,7 +104,6 @@ export interface HoneycombApi {
   inspectProviders: Invoke<"inspect-providers">;
   installOpenCode: Invoke<"install-opencode">;
   listModels: Invoke<"list-models">;
-  listCodexChatModels: Invoke<"list-codex-chat-models">;
   listOpenCodeEfforts: Invoke<"list-opencode-efforts">;
   setModel: Invoke<"set-model">;
   listOpenCodeModels(): Promise<ModelCatalog>;

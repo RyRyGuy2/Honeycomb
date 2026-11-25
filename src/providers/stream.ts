@@ -14,13 +14,18 @@ export type StreamEvent =
 type Transport = Parameters<typeof runJsonRpc>[0];
 type Publish = (event: StreamEvent) => void;
 
-function codexStream(transport: Transport, prompt: string, model: string | undefined, publish: Publish, effort?: string) {
+function codexStream(transport: Transport, prompt: string, model: string | undefined, publish: Publish, effort?: string, chat = false) {
   let notifyTurn: (error?: Error) => void = () => {};
   const turnDone = new Promise<Error | undefined>((resolve) => { notifyTurn = resolve; });
+  const chatFlags = chat ? [
+    "--disable", "shell_tool", "--disable", "unified_exec", "--disable", "apps", "--disable", "memories",
+    "--disable", "browser_use", "--disable", "computer_use", "--disable", "image_generation",
+    "-c", "tools.view_image=false",
+  ] : [];
   return runJsonRpc({
     ...transport,
     args: [...transport.args, "app-server", "-c", 'web_search="disabled"', "-c", "mcp_servers={}",
-      "--disable", "plugins", "--disable", "hooks", "--disable", "multi_agent", "--disable", "multi_agent_v2"],
+      "--disable", "plugins", "--disable", "hooks", "--disable", "multi_agent", "--disable", "multi_agent_v2", ...chatFlags],
   }, {
     onRequest(method) {
       if (method.endsWith("/requestApproval")) return { decision: "decline" };
@@ -32,6 +37,10 @@ function codexStream(transport: Transport, prompt: string, model: string | undef
       if (method === "item/started" || method === "item/completed") {
         const item = asRecord(params.item);
         const done = method === "item/completed";
+        if (chat && item && !["userMessage", "agentMessage", "reasoning", "plan", "contextCompaction"].includes(String(item.type))) {
+          notifyTurn(new Error("Codex tried to use a tool in Chat mode. Try asking for a text response."));
+          return;
+        }
         if (done && item?.type === "agentMessage" && typeof item.id === "string" && typeof item.text === "string") {
           publish({ type: "message", id: item.id, text: item.text });
         }
@@ -58,10 +67,23 @@ function codexStream(transport: Transport, prompt: string, model: string | undef
       }
     },
   }, async (rpc) => {
-    await rpc.request("initialize", { clientInfo: { name: "honeycomb", title: "Honeycomb", version: "0.1.0" } });
+    await rpc.request("initialize", {
+      clientInfo: { name: "honeycomb", title: "Honeycomb", version: "0.1.0" },
+      ...(chat ? { capabilities: { experimentalApi: true, requestAttestation: false } } : {}),
+    });
     rpc.notify("initialized");
+    if (chat) {
+      const { account } = await rpc.request("account/read", {});
+      if (asRecord(account)?.type !== "chatgpt") {
+        throw new Error("Run codex login in a terminal and sign in with ChatGPT to use Codex in Chat mode.");
+      }
+    }
     const response = await rpc.request("thread/start", {
       cwd: transport.cwd, model, ephemeral: true, approvalPolicy: "never", sandbox: "read-only",
+      ...(chat ? {
+        environments: [],
+        developerInstructions: "Answer the user's question directly in text. Do not use tools, run commands, or access files.",
+      } : {}),
     });
     const threadId = asRecord(response.thread)?.id;
     if (typeof threadId !== "string") throw new Error("Codex did not start a thread.");
@@ -234,4 +256,8 @@ export function streamOpenCodeChat(
   transport: Transport, prompt: string, model: string | undefined, version: string | undefined, publish: Publish, effort?: string,
 ) {
   return openCodeStream(transport, prompt, model, version, publish, effort, true);
+}
+
+export function streamCodexChat(transport: Transport, prompt: string, model: string | undefined, publish: Publish, effort?: string) {
+  return codexStream(transport, prompt, model, publish, effort, true);
 }

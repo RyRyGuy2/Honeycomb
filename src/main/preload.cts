@@ -16,7 +16,6 @@ const api: HoneycombApi = {
   inspectProviders: () => invoke("inspect-providers"),
   installOpenCode: () => invoke("install-opencode"),
   listModels: (providerId) => invoke("list-models", providerId),
-  listCodexChatModels: () => invoke("list-codex-chat-models"),
   listOpenCodeEfforts: (model) => invoke("list-opencode-efforts", model),
   setModel: (selection) => invoke("set-model", selection),
   listOpenCodeModels: () => invoke("list-models", "opencode"),
