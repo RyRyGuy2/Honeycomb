@@ -9,8 +9,8 @@
   "main": "dist/main/index.js",
   "scripts": {
     "start": "npm run build && electron .",
-    "build": "tsc && node dist/build/copy-renderer-assets.js",
-    "typecheck": "tsc --noEmit",
+    "build": "tsc && tsc -p tsconfig.renderer.json && node dist/build/copy-renderer-assets.js",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.renderer.json",
     "test": "npm run build && node --test"
   },
   "engines": {
@@ -18,11 +18,16 @@
   },
   "devDependencies": {
     "@types/node": "24.19.2",
+    "@types/react": "19.3.1",
+    "@types/react-dom": "19.3.0",
     "electron": "45.5.0",
+    "esbuild": "0.28.2",
     "typescript": "6.0.3"
   },
   "dependencies": {
     "extract-zip": "2.0.1",
-    "markdown-it": "14.1.1"
+    "markdown-it": "14.1.1",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
   }
 }

@@ -24,6 +24,8 @@
 
 *, *::before, *::after { box-sizing: border-box; }
 [hidden] { display: none !important; }
+/* React renders into #root; it must not add a box between body and the app grid. */
+#root { display: contents; }
 
 body {
   --rail-width: 56px;

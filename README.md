@@ -32,7 +32,7 @@ Run `npm test` to verify release selection, download integrity, model discovery,
 | Path | Responsibility |
 | --- | --- |
 | `src/main` | Electron window, native folder picker, and IPC bridge |
-| `src/renderer` | Chats, Workflows, and Connectors |
+| `src/renderer` | React UI for Chats, Workflows, and Connectors (`App.tsx`), its state and actions (`store.ts`), and styles; esbuild bundles it into `dist/renderer/app.js` |
 | `src/service` | Run lifecycle, event history, and subprocess supervision |
 | `src/providers` | CLI detection and provider-specific invocation and event decoding |
 | `src/shared` | Types for the desktop bridge, providers, and runs |
