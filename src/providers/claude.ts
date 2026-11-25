@@ -35,7 +35,7 @@ export function claudeModelCatalog(selected: string): ModelCatalog {
 }
 
 function failureMessage(text: string) {
-  if (/\b401\b|authentication_error|invalid api key|\/login|not logged in/i.test(text)) return SIGN_IN;
+  if (/\b401\b|authentication_error|failed to authenticate|token (has been )?revoked|log ?in again|invalid api key|\/login|not logged in/i.test(text)) return SIGN_IN;
   if (/\b(429|529)\b|rate_limit_error|overloaded_error|rate limit/i.test(text)) return RATE_LIMIT;
   return text;
 }
@@ -43,7 +43,8 @@ function failureMessage(text: string) {
 export const claude: ProviderAdapter = {
   id: "claude",
   name: "Claude Code",
-  npmLaunchers: [["@anthropic-ai", "claude-code", "cli.js"]],
+  // 2.x npm packages ship a native executable; 1.x shipped a JS entry point.
+  npmLaunchers: [["@anthropic-ai", "claude-code", "bin", "claude.exe"], ["@anthropic-ai", "claude-code", "cli.js"]],
   override: "HONEYCOMB_CLAUDE_PATH",
   authEnvironment: [
     "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN",
