@@ -1,5 +1,5 @@
 import type {
-  Connector, ConnectorStatus, HoneycombApi, ModelCatalog, ModelSelection, ProjectFolder, ProviderId, Run, RunEvent, RunStatus, RunUsage,
+  Connector, ConnectorStatus, HoneycombApi, ModelCatalog, ModelSelection, ProjectFolder, ProviderId, Run, RunEvent, RunStatus, RunUsage, WorkspaceMode,
 } from "../shared/contracts.js";
 
 declare global {
@@ -24,6 +24,7 @@ const thinkingField = get("thinking-level", HTMLSelectElement);
 const connectorModelField = get("connector-model", HTMLSelectElement);
 const runButton = get("run-task", HTMLButtonElement);
 const chatStatus = get("chat-status");
+const modeButtons = document.querySelectorAll<HTMLButtonElement>("[data-mode]");
 
 const statusLabels = {
   running: "Running",
@@ -54,6 +55,12 @@ const usd = new Intl.NumberFormat("en-US", {
 });
 
 let folder: ProjectFolder | undefined;
+let mode: WorkspaceMode = "code";
+let switchingMode = false;
+let codexChatCatalog: ModelCatalog | undefined;
+let loadingCodexChatModels = false;
+const drafts = { code: "", chat: "" };
+const lastRunByMode: Partial<Record<WorkspaceMode, string | undefined>> = {};
 let projects: ProjectFolder[] = [];
 const expandedProjects = new Set<string>();
 let selectedRunId: string | undefined;
@@ -123,7 +130,11 @@ function activeRun() {
 }
 
 function projectRuns(path = folder?.path) {
-  return history().filter((run) => run.folder.path === path);
+  return path ? history().filter((run) => run.folder?.path === path) : [];
+}
+
+function generalChats() {
+  return history().filter((run) => run.mode === "chat");
 }
 
 function statusDot(status: ConnectorStatus | RunStatus) {
@@ -141,26 +152,30 @@ function showError(error: unknown) {
 
 function renderControls() {
   const active = activeRun();
-  const busy = Boolean(active) || starting;
+  const busy = Boolean(active) || starting || switchingMode;
   const stop = get("stop-run", HTMLButtonElement);
   const providerId = chatProviderId();
   const provider = connectors.find((connector) => connector.id === providerId);
   const saving = pendingModel?.providerId === providerId;
-  const modelPending = Boolean(modelRequests[providerId]) || saving;
+  const codexChat = mode === "chat" && providerId === "codex";
+  const modelPending = codexChat ? loadingCodexChatModels : Boolean(modelRequests[providerId]) || saving;
   get("choose-folder", HTMLButtonElement).disabled = choosing || busy;
   get("new-task", HTMLButtonElement).disabled = choosing || busy;
+  for (const button of modeButtons) button.disabled = choosing || busy;
   stop.hidden = !active;
   stop.disabled = active?.status === "stopping";
   stop.textContent = stop.disabled ? "Stopping…" : "Stop run";
-  runButton.disabled = !folder || busy || choosing || modelPending || !promptField.value.trim() || provider?.status !== "detected";
+  runButton.disabled = (mode === "code" && !folder) || busy || choosing || modelPending ||
+    !promptField.value.trim() || (!codexChat && provider?.status !== "detected");
   chatStatus.dataset.error = String(Boolean(actionError));
 
   let message = actionError;
-  if (!message && !folder) message = "Choose a project folder to run a task.";
+  if (!message && mode === "code" && !folder) message = "Choose a project folder to run a task.";
   if (!message && active) message = `${active.providerName} is ${statusLabels[active.status].toLowerCase()}.`;
-  if (!message && provider?.status === "checking") message = `Checking for ${provider.name}…`;
-  if (!message && provider?.status !== "detected") message = `${provider?.name ?? "The connector"} is unavailable. See Connectors for details.`;
+  if (!message && !codexChat && provider?.status === "checking") message = `Checking for ${provider.name}…`;
+  if (!message && !codexChat && provider?.status !== "detected") message = `${provider?.name ?? "The connector"} is unavailable. See Connectors for details.`;
   if (!message && modelPending) message = saving ? `Saving ${provider?.name} model…` : `Loading ${provider?.name} models…`;
+  if (!message && codexChat && codexChatCatalog?.localError) message = codexChatCatalog.localError;
   if (chatStatus.textContent !== message) chatStatus.textContent = message;
 }
 
@@ -170,7 +185,20 @@ function chatProviderId(): ProviderId {
 
 function renderComposerProvider() {
   const providerId = chatProviderId();
-  if (!get("chats").hidden && !modelCatalogs[providerId] &&
+  if (mode === "chat" && providerId === "codex") {
+    if (!codexChatCatalog && !loadingCodexChatModels) {
+      loadingCodexChatModels = true;
+      void api.listCodexChatModels().then((catalog) => {
+        codexChatCatalog = catalog;
+      }).catch(() => {
+        codexChatCatalog = { models: [], selected: "", localError: "Could not load OpenAI models." };
+      }).finally(() => {
+        loadingCodexChatModels = false;
+        renderModels();
+        renderControls();
+      });
+    }
+  } else if (!get("chats").hidden && !modelCatalogs[providerId] &&
       connectors.some((connector) => connector.id === providerId && connector.status === "detected")) {
     void refreshModels(providerId);
   }
@@ -180,7 +208,7 @@ function renderComposerProvider() {
 }
 
 async function openProject(project: ProjectFolder, runId?: string) {
-  if (choosing || starting) return;
+  if (mode !== "code" || choosing || starting || switchingMode) return;
   choosing = true;
   actionError = "";
   renderControls();
@@ -210,6 +238,12 @@ function historyButton(run: Run, select: () => void) {
 
 function renderSidebar() {
   const list = get("run-list");
+  if (mode === "chat") {
+    const chats = generalChats();
+    list.replaceChildren(...(chats.length ? chats.map((run) => historyButton(run, () => selectRun(run.id)))
+      : [element("p", "", "No chats yet.")]));
+    return;
+  }
   const groups = projects.map((project) => {
     const group = element("section", "project-group");
     const title = element("button", "folder-picker");
@@ -356,7 +390,7 @@ function renderDetails(run: Run | undefined) {
 
   panel.replaceChildren(
     heading,
-    facts([["Project", run.folder.name], ["Workflow", "Solo"]]),
+    ...(run.folder ? [facts([["Project", run.folder.name], ["Workflow", "Solo"]])] : []),
     usage,
   );
 }
@@ -364,7 +398,7 @@ function renderDetails(run: Run | undefined) {
 function renderChats() {
   const run = selectedRunId ? runs.get(selectedRunId) : undefined;
   const title = get("chat-title");
-  title.textContent = run?.prompt.replace(/\s+/g, " ") ?? "New task";
+  title.textContent = run?.prompt.replace(/\s+/g, " ") ?? (mode === "chat" ? "New chat" : "New task");
   title.title = run ? title.textContent : "";
   renderSidebar();
   renderThread(run);
@@ -375,6 +409,46 @@ function renderChats() {
 function selectRun(id: string | undefined) {
   selectedRunId = id;
   renderChats();
+}
+
+function renderWorkspaceMode() {
+  const chat = mode === "chat";
+  for (const button of modeButtons) button.setAttribute("aria-pressed", String(button.dataset.mode === mode));
+  for (const button of viewButtons) {
+    if (button.dataset.view === "workflows") button.hidden = chat;
+  }
+  get("chats").classList.toggle("chat-only", chat);
+  get("choose-folder").hidden = chat;
+  get("history-title").textContent = chat ? "Recent chats" : "Projects";
+  get("welcome-title").textContent = chat ? "Ask a question" : "Start a review run";
+  get("welcome-description").textContent = chat ? "Choose a model and start a conversation." : "Choose a project and ask Codex or OpenCode to investigate.";
+  get("prompt-ideas").hidden = chat;
+  get("send-label").textContent = chat ? "Send" : "Run task";
+  promptField.placeholder = chat ? "Ask a question…" : "Ask about your project…";
+  renderComposerProvider();
+  renderChats();
+}
+
+async function switchMode(next: WorkspaceMode) {
+  if (mode === next || switchingMode || choosing || starting || activeRun()) return;
+  switchingMode = true;
+  renderControls();
+  try {
+    await api.setMode(next);
+    drafts[mode] = promptField.value;
+    lastRunByMode[mode] = selectedRunId;
+    mode = next;
+    promptField.value = drafts[mode];
+    selectedRunId = Object.hasOwn(lastRunByMode, mode) ? lastRunByMode[mode]
+      : (mode === "chat" ? generalChats() : projectRuns())[0]?.id;
+    actionError = "";
+    renderWorkspaceMode();
+  } catch (error) {
+    showError(error);
+  } finally {
+    switchingMode = false;
+    renderControls();
+  }
 }
 
 function renderConnectors() {
@@ -474,10 +548,11 @@ function shortModelName(model: ModelCatalog["models"][number]) {
 }
 
 function renderModelPicker(select: HTMLSelectElement, providerId: ProviderId) {
-  const catalog = modelCatalogs[providerId];
-  const loading = Boolean(modelRequests[providerId]);
+  const codexChat = select === chatModelField && mode === "chat" && providerId === "codex";
+  const catalog = codexChat ? codexChatCatalog : modelCatalogs[providerId];
+  const loading = codexChat ? loadingCodexChatModels : Boolean(modelRequests[providerId]);
   const providerName = providerId === "codex" ? "Codex" : "OpenCode";
-  const fallback = element("option", "", loading && !catalog ? "Loading models…" : `${providerName} default`);
+  const fallback = element("option", "", loading && !catalog ? "Loading models…" : codexChat ? "GPT-5 mini" : `${providerName} default`);
   fallback.value = "";
   const local = element("optgroup");
   local.label = `Listed by ${providerName}`;
@@ -490,7 +565,7 @@ function renderModelPicker(select: HTMLSelectElement, providerId: ProviderId) {
     option.disabled = !model.available;
     (model.available ? local : online).append(option);
   }
-  const selected = (pendingModel?.providerId === providerId ? pendingModel.model : catalog?.selected) ?? "";
+  const selected = (!codexChat && pendingModel?.providerId === providerId ? pendingModel.model : catalog?.selected) ?? "";
   if (selected && !catalog?.models.some((model) => model.id === selected && model.available)) {
     const saved = element("option", "", select === chatModelField ? selected.split("/").pop() : `${selected} (saved selection)`);
     saved.value = selected;
@@ -511,8 +586,9 @@ function effortLabel(value: string) {
 
 function renderThinking(providerId: ProviderId) {
   const modelId = chatModelField.value;
-  const key = providerId + ":" + modelId;
-  const catalog = modelCatalogs[providerId];
+  const codexChat = mode === "chat" && providerId === "codex";
+  const key = (codexChat ? "chat-codex" : providerId) + ":" + modelId;
+  const catalog = codexChat ? codexChatCatalog : modelCatalogs[providerId];
   const model = catalog?.models.find((entry) => entry.id === modelId);
   if (providerId === "opencode" && catalog && !effortChoices.has(key) && !effortRequests.has(key)) {
     effortRequests.add(key);
@@ -527,7 +603,7 @@ function renderThinking(providerId: ProviderId) {
       }
     });
   }
-  const choices = providerId === "codex" ? model?.efforts ?? [] : effortChoices.get(key) ?? [];
+  const choices = providerId === "codex" ? model?.efforts ?? catalog?.defaultEfforts ?? [] : effortChoices.get(key) ?? [];
   const saved = selectedEfforts.get(key) ?? "";
   const selected = choices.includes(saved) ? saved : "";
   const current = selected || model?.defaultEffort || "";
@@ -607,6 +683,12 @@ async function connectorAction(providerId: ProviderId, action: () => Promise<voi
 async function saveModel(picker: HTMLSelectElement) {
   const fromChat = picker === chatModelField;
   const providerId = fromChat ? chatProviderId() : selectedConnectorId;
+  if (fromChat && mode === "chat" && providerId === "codex") {
+    if (codexChatCatalog) codexChatCatalog.selected = picker.value;
+    actionError = "";
+    renderControls();
+    return;
+  }
   const catalog = modelCatalogs[providerId];
   if (!catalog || connectorBusy || modelRequests[providerId]) return;
   const model = picker.value;
@@ -654,6 +736,12 @@ async function refreshConnectors() {
 for (const button of viewButtons) {
   button.addEventListener("click", () => {
     if (button.dataset.view) showView(button.dataset.view);
+  });
+}
+for (const button of modeButtons) {
+  button.addEventListener("click", () => {
+    const next = button.dataset.mode;
+    if (next === "code" || next === "chat") void switchMode(next);
   });
 }
 for (const button of connectorButtons) {
@@ -708,6 +796,7 @@ get("new-task").addEventListener("click", () => {
 });
 
 get("choose-folder").addEventListener("click", async () => {
+  if (mode !== "code") return;
   choosing = true;
   actionError = "";
   renderControls();
@@ -743,7 +832,9 @@ providerField.addEventListener("change", () => {
   renderComposerProvider();
 });
 thinkingField.addEventListener("change", () => {
-  selectedEfforts.set(chatProviderId() + ":" + chatModelField.value, thinkingField.value);
+  const provider = chatProviderId();
+  const space = mode === "chat" && provider === "codex" ? "chat-codex" : provider;
+  selectedEfforts.set(space + ":" + chatModelField.value, thinkingField.value);
   renderComposerProvider();
 });
 
@@ -756,7 +847,9 @@ get("composer").addEventListener("submit", async (event) => {
   actionError = "";
   renderControls();
   try {
-    selectedRunId = await api.startRun({ providerId: connector.id, prompt: draft, effort: thinkingField.value });
+    selectedRunId = await api.startRun({
+      providerId: connector.id, prompt: draft, effort: thinkingField.value, model: chatModelField.value,
+    });
     if (promptField.value === draft) promptField.value = "";
   } catch (error) {
     showError(error);
@@ -776,7 +869,8 @@ api.onRunChanged((run) => {
     }
     return;
   }
-  if (run.revision === 1 && run.folder.path === folder?.path) selectedRunId = run.id;
+  const inMode = run.mode === "chat" ? mode === "chat" : mode === "code" && run.folder?.path === folder?.path;
+  if (run.revision === 1 && inMode) selectedRunId = run.id;
   renderChats();
 });
 
@@ -785,7 +879,8 @@ void refreshConnectors();
 api.getState().then((state) => {
   folder = state.folder;
   projects = state.projects;
+  mode = state.mode === "chat" ? "chat" : "code";
   for (const run of state.runs) remember(run);
-  selectedRunId ??= projectRuns()[0]?.id;
-  renderChats();
+  selectedRunId ??= (mode === "chat" ? generalChats() : projectRuns())[0]?.id;
+  renderWorkspaceMode();
 }).catch(showError);

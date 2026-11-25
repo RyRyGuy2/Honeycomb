@@ -38,6 +38,10 @@
 
     <div class="sidebar">
       <aside id="chats-sidebar" class="sidebar-panel" aria-labelledby="chats-sidebar-title">
+        <div class="workspace-mode" role="group" aria-label="Workspace mode">
+          <button type="button" data-mode="code" aria-pressed="true">Code</button>
+          <button type="button" data-mode="chat" aria-pressed="false">Chat</button>
+        </div>
         <h2 id="chats-sidebar-title" class="sidebar-title">Chats</h2>
         <button type="button" id="new-task" class="button sidebar-action">
           <span aria-hidden="true">+</span> New chat
@@ -46,7 +50,7 @@
           <span aria-hidden="true">+</span> Add project
         </button>
         <div class="sidebar-section run-history">
-          <h3>Projects</h3>
+          <h3 id="history-title">Projects</h3>
           <div id="run-list" class="run-list"></div>
         </div>
       </aside>
@@ -97,9 +101,9 @@
             <div class="welcome-mark" aria-hidden="true">
               <span></span><span></span><span></span>
             </div>
-            <h2>Start a review run</h2>
-            <p>Choose a project and ask Codex or OpenCode to investigate.</p>
-            <div class="prompt-ideas" aria-label="Example tasks">
+            <h2 id="welcome-title">Start a review run</h2>
+            <p id="welcome-description">Choose a project and ask Codex or OpenCode to investigate.</p>
+            <div id="prompt-ideas" class="prompt-ideas" aria-label="Example tasks">
               <button type="button" data-prompt="Summarize the repository layout and point me to the main entry points.">
                 Map the repository <span aria-hidden="true">↗</span>
               </button>
@@ -134,7 +138,7 @@
                 </select>
               </div>
               <button type="submit" id="run-task" class="button button-primary" disabled>
-                Run task <span aria-hidden="true">→</span>
+                <span id="send-label">Run task</span> <span aria-hidden="true">→</span>
               </button>
             </div>
           </form>

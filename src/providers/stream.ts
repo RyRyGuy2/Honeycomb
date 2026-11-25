@@ -1,4 +1,5 @@
 import { asRecord } from "../shared/records.js";
+import { randomUUID } from "node:crypto";
 import type { ProviderId } from "../shared/contracts.js";
 import { runJsonRpc } from "../service/json-rpc.js";
 import type { JsonRpc } from "../service/json-rpc.js";
@@ -19,7 +20,7 @@ function codexStream(transport: Transport, prompt: string, model: string | undef
   return runJsonRpc({
     ...transport,
     args: [...transport.args, "app-server", "-c", 'web_search="disabled"', "-c", "mcp_servers={}",
-      "--disable", "plugins", "--disable", "multi_agent"],
+      "--disable", "plugins", "--disable", "hooks", "--disable", "multi_agent", "--disable", "multi_agent_v2"],
   }, {
     onRequest(method) {
       if (method.endsWith("/requestApproval")) return { decision: "decline" };
@@ -98,6 +99,7 @@ export async function openCodeEfforts(transport: Transport, model: string, versi
   let efforts: string[] = [];
   await runJsonRpc(openCodeTransport(transport, version), { jsonrpc: true, onNotification() {} }, async (rpc) => {
     const session = await newOpenCodeSession(rpc, transport.cwd);
+    if (!Array.isArray(session.configOptions) && !isOpenCodeV2(version)) return;
     const { configOptions } = model
       ? await rpc.request("session/set_config_option", { sessionId: session.sessionId, configId: "model", value: model })
       : session;
@@ -114,13 +116,46 @@ export async function openCodeEfforts(transport: Transport, model: string, versi
 
 function openCodeStream(
   transport: Transport, prompt: string, model: string | undefined, version: string | undefined, publish: Publish, effort?: string,
+  chat = false,
 ) {
   const modern = isOpenCodeV2(version);
+  const runner = openCodeTransport(transport, version);
+  const agent = chat ? "honeycomb-chat-" + randomUUID() : modern ? "plan" : "honeycomb-review";
+  if (chat) {
+    const instructions = "Answer the user's question directly in text.";
+    const isolated = modern ? {
+      tools: { skill: false },
+      agents: {
+        title: { disabled: true },
+        [agent]: {
+          mode: "primary", steps: 1, system: instructions,
+          permissions: ["*", "skill"].map((action) => ({ action, resource: "*", effect: "deny" })),
+        },
+      },
+      policies: ["tool.use", "mcp.use", "skill.use", "websearch.use", "plugin.use"].map(
+        (action) => ({ action, resource: "*", effect: "deny" }),
+      ),
+    } : {
+      share: "disabled",
+      agent: {
+        title: { disable: true },
+        [agent]: { mode: "primary", steps: 1, prompt: instructions, permission: { "*": "deny" } },
+      },
+      permission: { "*": "deny" },
+    };
+    runner.env = {
+      ...runner.env, OPENCODE_CONFIG_CONTENT: JSON.stringify(isolated),
+      ...(modern ? {} : { OPENCODE_PERMISSION: '{"*":"deny"}' }),
+    };
+  }
   const toolNames = new Map<string, string>();
   let reply = 0;
   let activeSession: string | undefined;
+  let cancelUnexpectedTool: (() => void) | undefined;
+  let toolRequested = false;
+  let hasReplyText = false;
   let writing = false;
-  return runJsonRpc(openCodeTransport(transport, version), {
+  return runJsonRpc(runner, {
     jsonrpc: true,
     onRequest(method) {
       if (method === "session/request_permission") return { outcome: { outcome: "cancelled" } };
@@ -130,11 +165,17 @@ function openCodeStream(
       const update = asRecord(params.update);
       const content = asRecord(update?.content);
       if (update?.sessionUpdate === "agent_message_chunk" && content?.type === "text" && typeof content.text === "string") {
+        hasReplyText ||= Boolean(content.text.trim());
         if (!writing) reply++;
         writing = true;
         publish({ type: "delta", id: String(reply), text: content.text });
       }
       if (update?.sessionUpdate === "tool_call" || update?.sessionUpdate === "tool_call_update") {
+        if (chat) {
+          if (!toolRequested) cancelUnexpectedTool?.();
+          toolRequested = true;
+          return;
+        }
         writing = false;
         const id = update.toolCallId;
         if (typeof id !== "string") return;
@@ -155,21 +196,26 @@ function openCodeStream(
       }
     },
   }, async (rpc) => {
-    const { sessionId } = await newOpenCodeSession(rpc, transport.cwd);
+    const { sessionId, configOptions } = await newOpenCodeSession(rpc, transport.cwd);
     activeSession = sessionId;
-    await rpc.request("session/set_mode", { sessionId, modeId: modern ? "plan" : "honeycomb-review" });
+    cancelUnexpectedTool = () => rpc.notify("session/cancel", { sessionId });
+    // Fail before sending the prompt if the CLI didn't load the tool-free agent.
+    await rpc.request("session/set_mode", { sessionId, modeId: agent });
     if (model) {
-      if (modern) await rpc.request("session/set_config_option", { sessionId, configId: "model", value: model });
+      if (modern || Array.isArray(configOptions)) await rpc.request("session/set_config_option", { sessionId, configId: "model", value: model });
       else await rpc.request("session/set_model", { sessionId, modelId: model });
     }
     if (effort) {
-      if (!modern) throw new Error("Upgrade to OpenCode 2 to select a thinking level.");
       await rpc.request("session/set_config_option", { sessionId, configId: "effort", value: effort });
     }
-    const result = await rpc.request("session/prompt", { sessionId, prompt: [{ type: "text", text: prompt }] });
+    // OpenCode interprets a leading slash as a command. The Chat prompt is always literal text.
+    const text = chat ? "User question:\n" + prompt : prompt;
+    const result = await rpc.request("session/prompt", { sessionId, prompt: [{ type: "text", text }] });
+    if (toolRequested) throw new Error("The model tried to use a tool in Chat mode. Try asking for a text response.");
     if (!["end_turn", "max_tokens"].includes(String(result.stopReason))) {
       throw new Error("OpenCode ended the response with status " + String(result.stopReason) + ".");
     }
+    if (!hasReplyText) throw new Error("OpenCode returned no reply. Check the selected model and its credentials.");
     const usage = asRecord(result.usage);
     if (usage) publish({ type: "usage", inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, cachedTokens: usage.cachedReadTokens });
   });
@@ -182,4 +228,10 @@ export function streamProvider(
   return provider === "codex"
     ? codexStream(transport, prompt, model, publish, effort)
     : openCodeStream(transport, prompt, model, version, publish, effort);
+}
+
+export function streamOpenCodeChat(
+  transport: Transport, prompt: string, model: string | undefined, version: string | undefined, publish: Publish, effort?: string,
+) {
+  return openCodeStream(transport, prompt, model, version, publish, effort, true);
 }

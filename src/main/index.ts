@@ -2,6 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, nativeTheme, protocol, session, sh
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { listCodexChatModels } from "../providers/codex-chat.js";
 import { listCodexModels } from "../providers/codex-models.js";
 import { parseCodexModel } from "../providers/codex.js";
 import { inspectProviders, providerEnvironment } from "../providers/index.js";
@@ -11,7 +12,7 @@ import { opencode, parseOpenCodeModel } from "../providers/opencode.js";
 import { runProcess } from "../service/process.js";
 import { createRunService } from "../service/runs.js";
 import { createWorkspaceStore } from "../service/workspace.js";
-import type { IpcCalls, ProjectFolder, ProviderId } from "../shared/contracts.js";
+import type { IpcCalls, ProjectFolder, ProviderId, WorkspaceMode } from "../shared/contracts.js";
 import { asRecord } from "../shared/records.js";
 
 const APP_URL = "honeycomb://app/";
@@ -33,6 +34,7 @@ const CONTENT_POLICY = [
 let mainWindow: BrowserWindow | undefined;
 let folder: ProjectFolder | undefined;
 let projects: ProjectFolder[] = [];
+let mode: WorkspaceMode = "code";
 let quitting = false;
 const selectedModels: Record<ProviderId, string> = { codex: "", opencode: "" };
 const modelParsers = { codex: parseCodexModel, opencode: parseOpenCodeModel };
@@ -51,7 +53,7 @@ const runs = createRunService((run) => {
 }));
 
 function workspaceState() {
-  return { folder, projects, runs: runs.history() };
+  return { folder, projects, runs: runs.history(), mode };
 }
 
 function requireProviderId(value: unknown): ProviderId {
@@ -141,6 +143,7 @@ function registerHandlers() {
   });
   handle("list-opencode-efforts", (value) =>
     trackConnectorJob(listOpenCodeEfforts(getOpenCodePath(), parseOpenCodeModel(value), connectorAbort.signal)));
+  handle("list-codex-chat-models", () => trackConnectorJob(listCodexChatModels(connectorAbort.signal)));
   handle("set-model", (value) => {
     const payload = asRecord(value);
     const providerId = requireProviderId(payload?.providerId);
@@ -153,13 +156,21 @@ function registerHandlers() {
   });
   handle("test-opencode", () =>
     trackConnectorJob(testOpenCode(getOpenCodePath(), selectedModels.opencode, connectorAbort.signal)));
+  handle("set-mode", async (value) => {
+    if (value !== "code" && value !== "chat") throw new Error("Choose Code or Chat.");
+    if (runs.hasActiveRun()) throw new Error("Finish or stop the response before changing modes.");
+    mode = value;
+    await workspace.save(workspaceState());
+  });
   handle("choose-folder", async (_request, window) => {
+    if (mode !== "code") throw new Error("Switch to Code to add a project.");
     const selection = await dialog.showOpenDialog(window, {
       title: "Choose a project folder",
       properties: ["openDirectory"],
       defaultPath: folder?.path,
     });
     const [path] = selection.filePaths;
+    if (mode !== "code") return;
     if (!selection.canceled && path) {
       folder = projects.find((project) => project.path === path);
       if (!folder) {
@@ -171,13 +182,14 @@ function registerHandlers() {
     return selection.canceled ? undefined : folder;
   });
   handle("select-project", async (path) => {
+    if (mode !== "code") throw new Error("Switch to Code to open a project.");
     const project = projects.find((entry) => entry.path === path);
     if (!project) throw new Error("This project is no longer saved.");
     folder = project;
     await workspace.save(workspaceState());
     return project;
   });
-  handle("start-run", (request) => runs.start(folder, request));
+  handle("start-run", (request) => runs.start(mode === "code" ? folder : undefined, { ...asRecord(request), mode }));
   handle("open-reply-link", (value) => {
     if (typeof value !== "string") throw new Error("Invalid link.");
     const url = new URL(value);
@@ -223,6 +235,7 @@ app.whenReady().then(async () => {
     projects = saved.projects;
     folder = projects.find((project) => project.path === saved.folder?.path);
     runs.restore(saved.runs);
+    if (saved.mode === "chat") mode = "chat";
   }
   await Promise.all((["codex", "opencode"] as const).map(async (providerId) => {
     try {

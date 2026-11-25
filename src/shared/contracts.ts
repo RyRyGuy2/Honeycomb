@@ -1,4 +1,5 @@
 export type ProviderId = "codex" | "opencode";
+export type WorkspaceMode = "code" | "chat";
 export type ConnectorStatus = "checking" | "detected" | "missing" | "unavailable";
 
 export interface Connector {
@@ -14,6 +15,7 @@ export interface Connector {
 export interface ModelCatalog {
   models: Array<{ id: string; name: string; available: boolean; online: boolean; efforts?: string[]; defaultEffort?: string }>;
   selected: string;
+  defaultEfforts?: string[];
   localError?: string;
   onlineError?: string;
 }
@@ -53,7 +55,8 @@ export interface Run {
   id: string;
   providerId: ProviderId;
   providerName: string;
-  folder: ProjectFolder;
+  folder?: ProjectFolder;
+  mode?: WorkspaceMode;
   prompt: string;
   startedAt: string;
   finishedAt?: string;
@@ -67,12 +70,15 @@ export interface StartRunRequest {
   providerId: ProviderId;
   prompt: string;
   effort?: string;
+  mode?: WorkspaceMode;
+  model?: string;
 }
 
 export interface AppState {
   folder: ProjectFolder | undefined;
   projects: ProjectFolder[];
   runs: Run[];
+  mode?: WorkspaceMode;
 }
 
 export interface IpcCalls {
@@ -80,10 +86,12 @@ export interface IpcCalls {
   "inspect-providers": () => Connector[];
   "install-opencode": () => void;
   "list-models": (providerId: ProviderId) => ModelCatalog;
+  "list-codex-chat-models": () => ModelCatalog;
   "list-opencode-efforts": (model: string) => string[];
   "set-model": (selection: ModelSelection) => void;
   "test-opencode": () => void;
   "choose-folder": () => ProjectFolder | undefined;
+  "set-mode": (mode: WorkspaceMode) => void;
   "select-project": (path: string) => ProjectFolder;
   "start-run": (request: StartRunRequest) => string;
   "open-reply-link": (url: string) => void;
@@ -98,12 +106,14 @@ export interface HoneycombApi {
   inspectProviders: Invoke<"inspect-providers">;
   installOpenCode: Invoke<"install-opencode">;
   listModels: Invoke<"list-models">;
+  listCodexChatModels: Invoke<"list-codex-chat-models">;
   listOpenCodeEfforts: Invoke<"list-opencode-efforts">;
   setModel: Invoke<"set-model">;
   listOpenCodeModels(): Promise<ModelCatalog>;
   setOpenCodeModel(model: string): Promise<void>;
   testOpenCode: Invoke<"test-opencode">;
   chooseFolder: Invoke<"choose-folder">;
+  setMode: Invoke<"set-mode">;
   selectProject: Invoke<"select-project">;
   startRun: Invoke<"start-run">;
   openReplyLink: Invoke<"open-reply-link">;

@@ -1,13 +1,19 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { streamProvider } from "../dist/providers/stream.js";
+import { streamOpenCodeChat, streamProvider } from "../dist/providers/stream.js";
 
 const fixture = String.raw`
   const lines = require("node:readline").createInterface({ input: process.stdin });
   let codex;
+  let chat = false;
+  let pendingPrompt;
   const write = (value) => console.log(JSON.stringify(value));
   lines.on("line", (line) => {
     const { id, method, params } = JSON.parse(line);
+    if (method === "session/cancel" && pendingPrompt) {
+      write({ id: pendingPrompt, result: { stopReason: "cancelled" } });
+      return;
+    }
     if (id === undefined) return;
     const reply = (result = {}) => write({ id, result });
     const notify = (method, params) => write({ method, params });
@@ -20,6 +26,12 @@ const fixture = String.raw`
     } else if (method === "session/new") {
       reply({ sessionId: "s1" });
     } else if (method === "session/set_mode" || method === "session/set_config_option") {
+      if (method === "session/set_mode" && params.modeId.startsWith("honeycomb-chat-")) {
+        chat = true;
+        const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT);
+        if (!config.agents[params.modeId] || !config.policies.some((rule) =>
+          rule.action === "tool.use" && rule.resource === "*" && rule.effect === "deny")) process.exit(2);
+      }
       reply();
     } else if (method === "turn/start" || method === "session/prompt") {
       if (codex) {
@@ -32,6 +44,12 @@ const fixture = String.raw`
         }, 20);
       } else {
         const update = (update) => notify("session/update", { sessionId: "s1", update });
+        if (chat) {
+          if (params.prompt[0].text !== "User question:\n/compact") process.exit(2);
+          pendingPrompt = id;
+          update({ sessionUpdate: "tool_call", toolCallId: "tool", title: "skill" });
+          return;
+        }
         update({ sessionUpdate: "tool_call", toolCallId: "tool", title: "glob", rawInput: { pattern: "src/*" } });
         update({ sessionUpdate: "tool_call_update", toolCallId: "tool", status: "completed" });
         update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "**Live" } });
@@ -63,3 +81,11 @@ for (const provider of ["codex", "opencode"]) {
     }
   });
 }
+
+test("OpenCode Chat passes slash commands as text and stops an unexpected tool request", async () => {
+  const events = [];
+  await assert.rejects(streamOpenCodeChat({
+    file: process.execPath, args: ["-e", fixture, "--"], cwd: process.cwd(), env: process.env, timeoutMs: 5000,
+  }, "/compact", "provider/model", "2.4.1", (event) => events.push(event)), /tried to use a tool/);
+  assert.deepEqual(events, []);
+});

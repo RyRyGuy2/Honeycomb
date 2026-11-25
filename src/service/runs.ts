@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { chatApiKey, streamCodexChat } from "../providers/codex-chat.js";
+import { parseCodexModel } from "../providers/codex.js";
 import { checkProvider, providerEnvironment, providers } from "../providers/index.js";
-import { parseEffort, streamProvider } from "../providers/stream.js";
+import { parseEffort, streamOpenCodeChat, streamProvider } from "../providers/stream.js";
+import type { StreamEvent } from "../providers/stream.js";
 import type { ProviderAdapter, ProviderUsageEvent } from "../providers/types.js";
 import type { FinishedRunStatus, ProjectFolder, ProviderId, Run, RunEventData, RunUsage } from "../shared/contracts.js";
 import { asRecord } from "../shared/records.js";
@@ -61,25 +67,13 @@ export function createRunService(
     append(run, { type: "finished", status, text });
   }
 
-  async function execute(run: Run, provider: ProviderAdapter, signal: AbortSignal, effort?: string) {
+  async function execute(run: Run, provider: ProviderAdapter, signal: AbortSignal, effort?: string, chatModel?: string) {
     const env = providerEnvironment(provider);
     let providerNotice: string | undefined;
     const replies = new Map<string, Extract<Run["events"][number], { text: string }>>();
     let pendingUpdate: ReturnType<typeof setTimeout> | undefined;
-    try {
-      const options = optionsForProvider(provider.id);
-      const { connector, executable } = await checkProvider(provider, signal, options.executable);
-      if (signal.aborted) return finish(run, "cancelled", "Run stopped.");
-      if (!executable) throw new Error(connector.detail ?? provider.name + " was not found on PATH.");
-
-      await streamProvider(provider.id, {
-        ...executable, cwd: run.folder.path, env, timeoutMs: TIMEOUT_MS, signal,
-        onStderr(tail) {
-          if (providerNotice || signal.aborted) return;
-          providerNotice = provider.diagnoseStderr?.(tail);
-          if (providerNotice) append(run, { type: "notice", text: providerNotice });
-        },
-      }, run.prompt, options.model, connector.version, (event) => {
+    let isolatedDirectory: string | undefined;
+    function receive(event: StreamEvent) {
         if (signal.aborted) return;
         if (event.type === "usage") {
           const usage = usageFrom(event);
@@ -111,7 +105,30 @@ export function createRunService(
           const text = displayText(event.text, MAX_MESSAGE_LENGTH);
           if (text) append(run, { type: event.type, text });
         }
-      }, effort);
+    }
+    try {
+      if (run.mode === "chat" && provider.id === "codex") {
+        await streamCodexChat(chatApiKey(env), run.prompt, chatModel, AbortSignal.any([signal, AbortSignal.timeout(TIMEOUT_MS)]), receive, effort);
+      } else {
+        const options = optionsForProvider(provider.id);
+        const { connector, executable } = await checkProvider(provider, signal, options.executable);
+        if (signal.aborted) return finish(run, "cancelled", "Run stopped.");
+        if (!executable) throw new Error(connector.detail ?? provider.name + " was not found on PATH.");
+        if (run.mode === "chat") isolatedDirectory = await mkdtemp(join(tmpdir(), "honeycomb-chat-"));
+        const transport = {
+          ...executable, cwd: run.folder?.path ?? isolatedDirectory, env, timeoutMs: TIMEOUT_MS, signal,
+          onStderr(tail: string) {
+            if (providerNotice || signal.aborted) return;
+            providerNotice = provider.diagnoseStderr?.(tail);
+            if (providerNotice) append(run, { type: "notice", text: providerNotice });
+          },
+        };
+        if (run.mode === "chat") {
+          await streamOpenCodeChat(transport, run.prompt, options.model, connector.version, receive, effort);
+        } else {
+          await streamProvider(provider.id, transport, run.prompt, options.model, connector.version, receive, effort);
+        }
+      }
       if (signal.aborted) return finish(run, "cancelled", "Run stopped.");
       finish(run, "completed", "Run completed.");
     } catch (error) {
@@ -121,6 +138,7 @@ export function createRunService(
       finish(run, "failed", "Run failed.");
     } finally {
       clearTimeout(pendingUpdate);
+      if (isolatedDirectory) await rm(isolatedDirectory, { recursive: true, force: true }).catch(console.error);
     }
   }
 
@@ -144,12 +162,15 @@ export function createRunService(
     start(folder: ProjectFolder | undefined, request: unknown) {
       if (closing) throw new Error("Honeycomb is closing.");
       if (active) throw new Error("Stop or finish the active run before starting another.");
-      if (!folder) throw new Error("Choose a project folder first.");
       const payload = asRecord(request);
+      const mode = payload?.mode ?? "code";
+      if (mode !== "code" && mode !== "chat") throw new Error("Choose Code or Chat.");
+      if (mode === "code" && !folder) throw new Error("Choose a project folder first.");
       const providerId = payload?.providerId;
       const provider = typeof providerId === "string" ? providers.get(providerId) : undefined;
       if (!provider) throw new Error("Choose Codex or OpenCode.");
       const effort = parseEffort(payload?.effort, provider.id);
+      const chatModel = mode === "chat" && provider.id === "codex" ? parseCodexModel(payload?.model ?? "") : undefined;
       const prompt = typeof payload?.prompt === "string" ? payload.prompt.trim() : "";
       if (!prompt || prompt.length > MAX_PROMPT_LENGTH || prompt.includes("\0")) {
         throw new Error(`Enter a task of 1 to ${MAX_PROMPT_LENGTH.toLocaleString("en-US")} characters.`);
@@ -159,7 +180,8 @@ export function createRunService(
         id: randomUUID(),
         providerId: provider.id,
         providerName: provider.name,
-        folder,
+        mode,
+        folder: mode === "code" ? folder : undefined,
         prompt,
         startedAt: new Date().toISOString(),
         status: "running",
@@ -171,7 +193,7 @@ export function createRunService(
       history.unshift(run);
       active = { run, controller };
       append(run, { type: "started", text: `Starting ${provider.name}.` });
-      active.done = execute(run, provider, controller.signal, effort);
+      active.done = execute(run, provider, controller.signal, effort, chatModel);
       return run.id;
     },
     stop(runId: string) {

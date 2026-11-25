@@ -609,3 +609,32 @@ main { grid-column: 3; }
 .project-chats { display: grid; gap: .2rem; margin-left: 1rem; }
 .project-chats .history-item { padding-block: .35rem; }
 .history-more { justify-self: start; }
+
+.workspace-mode {
+  display: flex;
+  align-self: flex-start;
+  gap: 3px;
+  padding: 3px;
+  margin-bottom: 4px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--rail);
+}
+.workspace-mode button {
+  padding: 5px 11px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--muted);
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+}
+.workspace-mode button:hover:enabled { color: var(--text); }
+.workspace-mode button[aria-pressed="true"] {
+  color: var(--rail);
+  background: var(--accent);
+  font-weight: 650;
+}
+.workspace-mode button[aria-pressed="true"]:hover:enabled { color: var(--rail); background: var(--accent-hover); }
+.workspace.chat-only { grid-template: minmax(0, 1fr) / minmax(0, 1fr); }
+.workspace.chat-only .details { display: none; }

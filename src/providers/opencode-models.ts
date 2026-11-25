@@ -1,12 +1,12 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readJsonLines, runProcess } from "../service/process.js";
+import { runProcess } from "../service/process.js";
 import type { ModelCatalog } from "../shared/contracts.js";
 import { asRecord } from "../shared/records.js";
 import { checkProvider, providerEnvironment } from "./index.js";
 import { isOpenCodeV2, opencode, parseOpenCodeModel } from "./opencode.js";
-import { openCodeEfforts } from "./stream.js";
+import { openCodeEfforts, streamOpenCodeChat } from "./stream.js";
 
 const CATALOGS = ["https://opencode.ai/zen/v1/models", "https://opencode.ai/inference/v1/models"];
 
@@ -59,7 +59,7 @@ async function listLocalModels(managedPath: string | undefined, signal?: AbortSi
 
 export async function listOpenCodeEfforts(managedPath: string | undefined, model: string, signal: AbortSignal) {
   const { connector, executable } = await checkProvider(opencode, signal, managedPath);
-  if (!executable || !isOpenCodeV2(connector.version)) return [];
+  if (!executable) return [];
   const directory = await mkdtemp(join(tmpdir(), "honeycomb-opencode-models-"));
   try {
     return await openCodeEfforts({
@@ -100,32 +100,10 @@ export async function testOpenCode(managedPath: string | undefined, model: strin
   if (!executable) throw new Error(connector.detail || "Install OpenCode to test the connector.");
   const directory = await mkdtemp(join(tmpdir(), "honeycomb-opencode-test-"));
   try {
-    const command = opencode.command("Reply with OK. No tools are needed.", model, connector.version);
-    let response = false;
-    let completed = false;
-    let failure: string | undefined;
-    let notice: string | undefined;
-    const result = await runProcess({
-      file: executable.file,
-      args: [...executable.args, ...command.args],
-      cwd: directory,
-      input: command.input,
-      env: { ...providerEnvironment(opencode), ...command.env },
-      timeoutMs: 30_000,
-      signal,
-      stdout: readJsonLines((record) => {
-        const update = opencode.decode(record);
-        const event = update?.event;
-        if (event?.type === "message" && typeof event.text === "string" && event.text.trim()) response = true;
-        completed ||= Boolean(update?.completed);
-        failure = update?.failed ?? failure;
-      }),
-      onStderr: (tail) => { notice ??= opencode.diagnoseStderr?.(tail); },
-    });
-    if (result.code === 0 && response && completed && !failure) return;
-    throw new Error(failure || notice || (result.stopped === "timeout"
-      ? "The model test timed out. Check the model setup or try another model."
-      : "OpenCode did not return a model response. Check the selected model and its credentials."));
+    await streamOpenCodeChat({
+      ...executable, cwd: directory, env: providerEnvironment(opencode), timeoutMs: 30_000, signal,
+    }, "Reply with OK.", model, connector.version, () => {});
+    signal?.throwIfAborted();
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
