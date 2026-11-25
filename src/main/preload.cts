@@ -27,6 +27,7 @@ const api: HoneycombApi = {
   startRun: (request) => invoke("start-run", request),
   openReplyLink: (url) => invoke("open-reply-link", url),
   stopRun: (runId) => invoke("stop-run", runId),
+  showSidebarMenu: (request) => invoke("sidebar-menu", request),
   onRunChanged(callback) {
     const listener = (_event: IpcRendererEvent, run: Run) => callback(run);
     ipcRenderer.on("honeycomb:run-changed", listener);

@@ -164,6 +164,21 @@ export function createRunService(
     history() {
       return history;
     },
+    async deleteChat(runId: string, save: () => Promise<boolean>) {
+      const index = history.findIndex((run) => run.id === runId);
+      const run = history[index];
+      if (!run) return false;
+      if (run.status === "running" || run.status === "stopping") {
+        throw new Error("Stop the run before deleting this chat.");
+      }
+      history.splice(index, 1);
+      if (await save()) return true;
+
+      history.push(run);
+      history.sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+      await save();
+      throw new Error("Could not save chat history. The chat was kept.");
+    },
     start(folder: ProjectFolder | undefined, request: unknown) {
       if (closing) throw new Error("Honeycomb is closing.");
       if (active) throw new Error("Stop or finish the active run before starting another.");

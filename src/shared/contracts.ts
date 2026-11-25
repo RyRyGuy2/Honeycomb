@@ -81,6 +81,13 @@ export interface AppState {
   mode?: WorkspaceMode;
 }
 
+export interface SidebarMenuRequest {
+  target: "chat" | "project";
+  id: string;
+  x: number;
+  y: number;
+}
+
 export interface IpcCalls {
   state: () => AppState;
   "inspect-providers": () => Connector[];
@@ -95,6 +102,7 @@ export interface IpcCalls {
   "start-run": (request: StartRunRequest) => string;
   "open-reply-link": (url: string) => void;
   "stop-run": (runId: string) => void;
+  "sidebar-menu": (request: SidebarMenuRequest) => boolean;
 }
 
 type Invoke<Channel extends keyof IpcCalls> =
@@ -116,5 +124,6 @@ export interface HoneycombApi {
   startRun: Invoke<"start-run">;
   openReplyLink: Invoke<"open-reply-link">;
   stopRun: Invoke<"stop-run">;
+  showSidebarMenu: Invoke<"sidebar-menu">;
   onRunChanged(callback: (run: Run) => void): () => void;
 }

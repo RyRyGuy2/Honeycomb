@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, nativeTheme, protocol, session, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, protocol, session, shell } from "electron";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -58,6 +58,21 @@ const runs = createRunService((run) => {
 
 function workspaceState() {
   return { folder, projects, runs: runs.history(), mode };
+}
+
+async function removeProject(path: string) {
+  const index = projects.findIndex((entry) => entry.path === path);
+  const project = projects[index];
+  if (!project) return false;
+  const wasSelected = folder?.path === path;
+  projects.splice(index, 1);
+  if (wasSelected) folder = undefined;
+  if (await workspace.save(workspaceState())) return true;
+
+  if (!projects.some((entry) => entry.path === path)) projects.splice(index, 0, project);
+  if (wasSelected) folder ??= project;
+  await workspace.save(workspaceState());
+  throw new Error("Could not save the project list. The project was kept.");
 }
 
 function requireProviderId(value: unknown): ProviderId {
@@ -210,6 +225,44 @@ function registerHandlers() {
   handle("stop-run", (runId) => {
     if (typeof runId !== "string") throw new Error("Invalid run.");
     runs.stop(runId);
+  });
+  handle("sidebar-menu", async (request, window) => {
+    const { target, id, x, y } = asRecord(request) ?? {};
+    if ((target !== "project" && target !== "chat") || typeof id !== "string" ||
+        typeof x !== "number" || typeof y !== "number" || !Number.isSafeInteger(x) || !Number.isSafeInteger(y)) {
+      throw new Error("Invalid sidebar action.");
+    }
+    const project = target === "project" ? projects.find((entry) => entry.path === id) : undefined;
+    const run = target === "chat" ? runs.history().find((entry) => entry.id === id) : undefined;
+    if (!project && !run) return false;
+
+    const label = project ? "Remove project" : "Delete chat";
+    const { width, height } = window.getContentBounds();
+    const chosen = await new Promise<boolean>((resolve) => {
+      Menu.buildFromTemplate([{
+        label,
+        enabled: run?.status !== "running" && run?.status !== "stopping",
+        click: () => resolve(true),
+      }]).popup({
+        window,
+        x: Math.min(Math.max(0, x), width),
+        y: Math.min(Math.max(0, y), height),
+        callback: () => setImmediate(resolve, false),
+      });
+    });
+    if (!chosen || window.isDestroyed()) return false;
+
+    const { response } = await dialog.showMessageBox(window, {
+      type: "warning",
+      title: label,
+      message: project ? `Remove ${project.name} from Honeycomb?` : "Delete this chat?",
+      detail: project ? "The folder, files, and chat history will be kept." : run?.prompt.replace(/\s+/g, " ").slice(0, 160),
+      buttons: ["Cancel", project ? "Remove" : "Delete"],
+      defaultId: 0,
+      cancelId: 0,
+    });
+    if (response !== 1) return false;
+    return project ? removeProject(id) : runs.deleteChat(id, () => workspace.save(workspaceState()));
   });
 }
 

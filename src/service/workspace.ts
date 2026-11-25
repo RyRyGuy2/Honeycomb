@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import type { AppState } from "../shared/contracts.js";
 
 export function createWorkspaceStore(filename: () => string) {
-  let pending = Promise.resolve();
+  let pending = Promise.resolve(true);
   return {
     async load(): Promise<AppState | undefined> {
       try {
@@ -22,7 +22,11 @@ export function createWorkspaceStore(filename: () => string) {
         await mkdir(dirname(path), { recursive: true });
         await writeFile(`${path}.tmp`, data, { mode: 0o600 });
         await rename(`${path}.tmp`, path);
-      }).catch((error) => console.error("Could not save Honeycomb history", error));
+        return true;
+      }).catch((error) => {
+        console.error("Could not save Honeycomb history", error);
+        return false;
+      });
       return pending;
     },
     flush: () => pending,

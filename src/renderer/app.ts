@@ -1,5 +1,6 @@
 import type {
-  Connector, ConnectorStatus, HoneycombApi, ModelCatalog, ModelSelection, ProjectFolder, ProviderId, Run, RunEvent, RunStatus, RunUsage, WorkspaceMode,
+  Connector, ConnectorStatus, HoneycombApi, ModelCatalog, ModelSelection, ProjectFolder, ProviderId, Run, RunEvent, RunStatus, RunUsage,
+  SidebarMenuRequest, WorkspaceMode,
 } from "../shared/contracts.js";
 
 declare global {
@@ -68,6 +69,8 @@ const drafts = { code: "", chat: "" };
 const lastRunByMode: Partial<Record<WorkspaceMode, string | undefined>> = {};
 let projects: ProjectFolder[] = [];
 const expandedProjects = new Set<string>();
+const collapsedProjects = new Set<string>();
+let sidebarMenuOpen = false;
 let selectedRunId: string | undefined;
 let selectedConnectorId: ProviderId = "codex";
 let catalogOpen = false;
@@ -205,8 +208,10 @@ async function openProject(project: ProjectFolder, runId?: string) {
   actionError = "";
   renderControls();
   try {
-    folder = await api.selectProject(project.path);
-    selectedRunId = runId ?? projectRuns()[0]?.id;
+    const selection = await api.selectProject(project.path);
+    if (!projects.some((entry) => entry.path === selection.path)) return;
+    folder = selection;
+    selectedRunId = runId && runs.has(runId) ? runId : projectRuns()[0]?.id;
   } catch (error) {
     showError(error);
   } finally {
@@ -215,16 +220,69 @@ async function openProject(project: ProjectFolder, runId?: string) {
   }
 }
 
+async function showSidebarMenu(request: SidebarMenuRequest, button: HTMLButtonElement) {
+  if (sidebarMenuOpen) return;
+  sidebarMenuOpen = true;
+  button.focus({ preventScroll: true });
+  try {
+    if (!await api.showSidebarMenu(request)) return;
+    const { target, id } = request;
+    if (target === "project") {
+      projects = projects.filter((project) => project.path !== id);
+      expandedProjects.delete(id);
+      collapsedProjects.delete(id);
+      const lastCodeRun = lastRunByMode.code;
+      if (lastCodeRun && runs.get(lastCodeRun)?.folder?.path === id) delete lastRunByMode.code;
+      if (folder?.path === id) {
+        folder = undefined;
+        if (mode === "code") selectedRunId = undefined;
+      }
+    } else {
+      const chatMode = runs.get(id)?.mode ?? "code";
+      runs.delete(id);
+      if (lastRunByMode[chatMode] === id) delete lastRunByMode[chatMode];
+      if (selectedRunId === id) selectedRunId = (mode === "chat" ? generalChats() : projectRuns())[0]?.id;
+    }
+    actionError = "";
+    const restoreFocus = button === document.activeElement || document.activeElement === document.body;
+    renderChats();
+    if (restoreFocus) {
+      const next = get("run-list").querySelector<HTMLButtonElement>('.history-item[aria-current="true"]:not([hidden] *)');
+      (next ?? get("new-task")).focus();
+    }
+  } catch (error) {
+    showError(error);
+  } finally {
+    sidebarMenuOpen = false;
+  }
+}
+
+function bindSidebarMenu(button: HTMLButtonElement, target: SidebarMenuRequest["target"], id: string) {
+  button.setAttribute("aria-haspopup", "menu");
+  button.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    void showSidebarMenu({ target, id, x: Math.round(event.clientX), y: Math.round(event.clientY) }, button);
+  });
+  button.addEventListener("keydown", (event) => {
+    if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+    event.preventDefault();
+    const { left, bottom } = button.getBoundingClientRect();
+    void showSidebarMenu({ target, id, x: Math.round(left), y: Math.round(bottom) }, button);
+  });
+}
+
 function historyButton(run: Run, select: () => void) {
   const button = element("button", "history-item");
+  const name = run.prompt.replace(/\s+/g, " ");
   button.type = "button";
   button.title = run.prompt;
   if (run.id === selectedRunId) button.setAttribute("aria-current", "true");
   button.append(
-    element("span", "history-name", run.prompt.replace(/\s+/g, " ")),
+    element("span", "history-name", name),
     element("span", "history-meta", `${run.providerName} · ${statusLabels[run.status]}`),
   );
   button.addEventListener("click", select);
+  bindSidebarMenu(button, "chat", run.id);
   return button;
 }
 
@@ -236,17 +294,20 @@ function renderSidebar() {
       : [element("p", "", "No chats yet.")]));
     return;
   }
-  const groups = projects.map((project) => {
+  const groups = projects.map((project, index) => {
     const group = element("section", "project-group");
+    const header = element("div", "project-heading");
     const title = element("button", "folder-picker");
     title.type = "button";
     title.title = project.path;
     title.append(element("span", "folder-icon"), element("span", "history-name", project.name));
     if (project.path === folder?.path) title.setAttribute("aria-current", "true");
     title.addEventListener("click", () => void openProject(project));
+    bindSidebarMenu(title, "project", project.path);
     const chats = projectRuns(project.path);
     const expanded = expandedProjects.has(project.path);
     const chatList = element("div", "project-chats");
+    chatList.id = `project-chats-${index}`;
     for (const run of expanded ? chats : chats.slice(0, 3)) {
       chatList.append(historyButton(run, () => void openProject(project, run.id)));
     }
@@ -262,7 +323,27 @@ function renderSidebar() {
       });
       chatList.append(toggle);
     }
-    group.append(title, chatList);
+    header.append(title);
+    if (chats.length) {
+      const disclosure = element("button", "sidebar-action-button project-disclosure");
+      disclosure.type = "button";
+      disclosure.setAttribute("aria-controls", chatList.id);
+      function updateDisclosure() {
+        const collapsed = collapsedProjects.has(project.path);
+        const label = `${collapsed ? "Show" : "Hide"} chats in ${project.name}`;
+        chatList.hidden = collapsed;
+        disclosure.setAttribute("aria-expanded", String(!collapsed));
+        disclosure.setAttribute("aria-label", label);
+        disclosure.title = label;
+      }
+      disclosure.addEventListener("click", () => {
+        if (!collapsedProjects.delete(project.path)) collapsedProjects.add(project.path);
+        updateDisclosure();
+      });
+      updateDisclosure();
+      header.append(disclosure);
+    }
+    group.append(header, chatList);
     return group;
   });
   list.replaceChildren(...(groups.length ? groups : [element("p", "", "No saved projects yet.")]));
@@ -406,9 +487,6 @@ function selectRun(id: string | undefined) {
 function renderWorkspaceMode() {
   const chat = mode === "chat";
   for (const button of modeButtons) button.setAttribute("aria-pressed", String(button.dataset.mode === mode));
-  for (const button of viewButtons) {
-    if (button.dataset.view === "workflows") button.hidden = chat;
-  }
   get("chats").classList.toggle("chat-only", chat);
   get("choose-folder").hidden = chat;
   get("history-title").textContent = chat ? "Recent chats" : "Projects";
