@@ -78,4 +78,7 @@ test("limit and rate errors have clear messages", () => {
   assert.match(claude.decode({ type: "result", subtype: "error_max_turns", is_error: true }).failed, /turn limit/);
   assert.match(claude.decode({ type: "result", subtype: "success", is_error: true, result: "API Error: 529 overloaded_error" }).failed, /rate limited or overloaded/);
   assert.match(claude.diagnoseStderr("Invalid API key · Please run /login"), /signed in/);
+  // Wording from Claude Code 2.1.332 with a revoked sign-in.
+  assert.match(claude.decode({ type: "result", subtype: "success", is_error: true,
+    result: "Failed to authenticate: OAuth token revoked. Please log in again or contact your administrator." }).failed, /isn't signed in/);
 });
