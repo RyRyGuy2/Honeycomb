@@ -1,4 +1,4 @@
-export type ProviderId = "codex" | "opencode";
+export type ProviderId = "codex" | "opencode" | "claude";
 export type WorkspaceMode = "code" | "chat";
 export type ConnectorStatus = "checking" | "detected" | "missing" | "unavailable";
 
