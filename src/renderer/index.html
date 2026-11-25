@@ -123,17 +123,16 @@
             <div class="composer-actions">
               <div class="composer-options">
                 <label class="visually-hidden" for="provider">Connector</label>
-                <select id="provider">
+                <select id="provider" class="composer-select">
                   <option value="codex">Codex</option>
                   <option value="opencode">OpenCode</option>
                 </select>
                 <span id="chat-model-control">
                   <label class="visually-hidden" for="chat-model">Model</label>
-                  <select id="chat-model" disabled>
+                  <select id="chat-model" class="composer-select" disabled>
                     <option value="">Codex default</option>
                   </select>
                 </span>
-                <span class="review-mode">Review mode</span>
               </div>
               <button type="submit" id="run-task" class="button button-primary" disabled>
                 Run task <span aria-hidden="true">→</span>

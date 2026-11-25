@@ -407,17 +407,18 @@ main { grid-column: 3; }
 .composer-actions > .button { flex: none; }
 #chat-model-control { min-width: 0; max-width: 100%; }
 .composer-options #chat-model { max-width: min(220px, 100%); text-overflow: ellipsis; }
-.composer-options select {
+.composer-select {
   max-width: 125px;
-  padding: 6px 8px;
-  border: 1px solid var(--strong-border);
-  border-radius: 6px;
-  color: var(--text);
-  background: var(--control);
+  padding: 5px 2px;
+  border: 0;
+  border-radius: 4px;
+  color: var(--muted);
+  background: transparent;
   font-size: 12px;
   font-weight: 620;
 }
-.review-mode { white-space: nowrap; color: var(--muted); font-size: 11px; }
+.composer-select:hover:enabled { color: var(--text); }
+.composer-select option, .composer-select optgroup { color: var(--text); background: var(--control); }
 .chat-status { min-height: 29px; padding: 8px 1px 0; color: var(--muted); font-size: 12px; }
 .chat-status[data-error="true"] { color: var(--accent-hover); }
 
@@ -574,5 +575,4 @@ main { grid-column: 3; }
   .details > h2 { margin-bottom: 6px; }
   .welcome { padding-bottom: 10px; }
   .thread { padding-block: 12px; }
-  .review-mode { display: none; }
 }
