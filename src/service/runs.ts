@@ -19,6 +19,8 @@ import type { WorktreeManager } from "./worktree.js";
 const MAX_PROMPT_LENGTH = 8_000;
 const MAX_MESSAGE_LENGTH = 16_000;
 const TIMEOUT_MS = 5 * 60_000;
+const MIN_TIMEOUT_MS = 30_000;
+const MAX_TIMEOUT_MS = 30 * 60_000;
 const USAGE_KEYS = ["inputTokens", "outputTokens", "cachedTokens", "costUsd"] as const;
 
 interface ActiveRun {
@@ -42,6 +44,13 @@ function usageFrom(event: ProviderUsageEvent): RunUsage {
   return usage;
 }
 
+function parseTimeout(value: unknown) {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < MIN_TIMEOUT_MS || value > MAX_TIMEOUT_MS) {
+    throw new Error("A step time limit must be between 30 seconds and 30 minutes.");
+  }
+  return value;
+}
+
 function failureText(value: unknown, env: NodeJS.ProcessEnv, secrets: readonly string[] = []) {
   if (typeof value !== "string") return "";
   let text = value.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
@@ -58,6 +67,7 @@ export function createRunService(
   worktrees?: WorktreeManager,
 ) {
   const history: Run[] = [];
+  const waiters = new Map<string, Array<(run: Run) => void>>();
   let active: ActiveRun | undefined;
   let closing = false;
 
@@ -75,6 +85,10 @@ export function createRunService(
     run.status = status;
     run.finishedAt = new Date().toISOString();
     append(run, { type: "finished", status, text });
+    const pending = waiters.get(run.id);
+    if (!pending) return;
+    waiters.delete(run.id);
+    for (const resolve of pending) resolve(run);
   }
 
   async function execute(run: Run, provider: ProviderAdapter, prompt: string, signal: AbortSignal, effort?: string, chatModel?: string) {
@@ -91,19 +105,21 @@ export function createRunService(
     let isolatedDirectory: string | undefined;
 
     async function prepareWorktree() {
-      if (!run.edit) return;
+      if (!run.edit && !run.worktree) return;
       if (!worktrees) throw new Error("Editing in a worktree is not available in this build.");
       const project = run.folder?.path;
       if (!project) throw new Error("Choose a project folder first.");
       const existing = run.worktree;
       if (existing) {
         if (!(await worktrees.exists(existing))) {
-          throw new Error("The worktree for this chat is no longer available. Start a new Code chat to create another.");
+          throw new Error("The worktree for this run is no longer available. Start a new run to create another.");
         }
         worktreePath = existing.path;
-        append(run, { type: "notice", text: `Editing in ${existing.branch} from ${existing.baseCommit.slice(0, 10)}.` });
+        const label = run.edit ? "Editing" : "Working";
+        append(run, { type: "notice", text: `${label} in ${existing.branch} from ${existing.baseCommit.slice(0, 10)}.` });
         return;
       }
+      if (!run.edit) return;
       append(run, { type: "notice", text: "Creating an editing branch and Git worktree…" });
       const created = await worktrees.create(project);
       run.worktree = { ...created };
@@ -116,7 +132,7 @@ export function createRunService(
 
     async function attachDiff() {
       const worktree = run.worktree;
-      if (!run.edit || !worktree || !worktreePath || !worktrees) return;
+      if (!worktree || !worktreePath || !worktrees) return;
       try {
         const diff = await worktrees.diff(worktree);
         run.diff = diff;
@@ -170,6 +186,7 @@ export function createRunService(
     }
     try {
       const options = optionsForProvider(provider.id);
+      const model = run.modelOverride ?? options.model;
       const { connector, executable } = await checkProvider(provider, signal, options.executable);
       if (signal.aborted) {
         await attachDiff();
@@ -179,7 +196,7 @@ export function createRunService(
       await prepareWorktree();
       if (run.mode === "chat") isolatedDirectory = await mkdtemp(join(tmpdir(), "honeycomb-chat-"));
       const transport = {
-        ...executable, cwd: worktreePath ?? run.folder?.path ?? isolatedDirectory, env, timeoutMs: TIMEOUT_MS, signal,
+        ...executable, cwd: worktreePath ?? run.folder?.path ?? isolatedDirectory, env, timeoutMs: run.timeoutMs ?? TIMEOUT_MS, signal,
         onStderr(tail: string) {
           if (providerNotice || signal.aborted) return;
           providerNotice = provider.diagnoseStderr?.(tail);
@@ -190,15 +207,15 @@ export function createRunService(
         await streamCodexChat(transport, prompt, chatModel, receive, effort);
       } else if (provider.id === "codex" && run.edit) {
         if (!worktreePath) throw new Error("Codex editing requires a Git worktree.");
-        await streamCodexEdit({ ...transport, cwd: worktreePath }, prompt, options.model, receive, effort);
+        await streamCodexEdit({ ...transport, cwd: worktreePath }, prompt, model, receive, effort);
       } else if (provider.id === "claude") {
         await streamClaude(transport, prompt, {
-          model: options.model, effort, chat: run.mode === "chat", edit: run.edit === true,
+          model, effort, chat: run.mode === "chat", edit: run.edit === true,
         }, receive);
       } else if (run.mode === "chat") {
-        await streamOpenCodeChat(transport, prompt, options.model, connector.version, receive, effort);
+        await streamOpenCodeChat(transport, prompt, model, connector.version, receive, effort);
       } else {
-        await streamProvider(provider.id, transport, prompt, options.model, connector.version, receive, effort);
+        await streamProvider(provider.id, transport, prompt, model, connector.version, receive, effort);
       }
       if (signal.aborted) {
         await attachDiff();
@@ -222,6 +239,20 @@ export function createRunService(
   }
 
   return {
+    runById(runId: string) {
+      return history.find((run) => run.id === runId);
+    },
+    /** Resolves when the run reaches a finished status. */
+    async waitForRun(runId: string) {
+      const run = history.find((entry) => entry.id === runId);
+      if (!run) throw new Error("This run is no longer recorded.");
+      if (run.status !== "running" && run.status !== "stopping") return run;
+      return new Promise<Run>((resolve) => {
+        const pending = waiters.get(runId) ?? [];
+        pending.push(resolve);
+        waiters.set(runId, pending);
+      });
+    },
     restore(saved: Run[]) {
       for (const run of saved) {
         if (run.status === "running" || run.status === "stopping") {
@@ -280,6 +311,17 @@ export function createRunService(
       if (edit && !supportsWorktreeEditing(provider.id)) {
         throw new Error("Choose Codex or Claude Code to edit in a Git worktree.");
       }
+      const sharedWorktreeId = payload?.worktreeId;
+      if (sharedWorktreeId !== undefined && typeof sharedWorktreeId !== "string") throw new Error("Invalid worktree.");
+      const workflowRunId = payload?.workflowRunId;
+      if (workflowRunId !== undefined && typeof workflowRunId !== "string") throw new Error("Invalid workflow run.");
+      const modelValue = payload?.modelOverride;
+      if (modelValue !== undefined && (typeof modelValue !== "string" || modelValue.length > 200 || modelValue.includes("\0"))) {
+        throw new Error("Invalid model.");
+      }
+      const modelOverride = typeof modelValue === "string" ? modelValue.trim() : "";
+      const timeoutValue = payload?.timeoutMs;
+      const timeoutMs = timeoutValue === undefined ? undefined : parseTimeout(timeoutValue);
       const turns = thread === undefined ? [] : conversation(thread);
       const first = turns[0];
       if (thread !== undefined && !first) throw new Error("This chat is no longer saved.");
@@ -288,8 +330,17 @@ export function createRunService(
       }
       if (first && turns.some((turn) => turn.providerId !== provider.id)) throw new Error(`Continue this chat with ${first.providerName}.`);
       const context = first ? conversationContext(turns) : undefined;
-      // Follow-up edits continue in the worktree this chat already opened, if it still exists.
-      const worktree = edit ? turns.find((turn) => turn.worktree && turn.worktree.state !== "discarded")?.worktree : undefined;
+      // A shared worktree lets workflow steps with different connectors work in one checkout.
+      // Otherwise a follow-up edit continues in the worktree its chat already opened, if it still exists.
+      let worktree;
+      if (sharedWorktreeId !== undefined) {
+        if (mode !== "code") throw new Error("Switch to Code to work in a Git worktree.");
+        const record = worktrees?.find(sharedWorktreeId);
+        if (!record || record.state === "discarded") throw new Error("The workflow worktree is no longer available.");
+        worktree = { id: record.id, branch: record.branch, path: record.path, baseCommit: record.baseCommit, state: record.state };
+      } else if (edit) {
+        worktree = turns.find((turn) => turn.worktree && turn.worktree.state !== "discarded")?.worktree;
+      }
       const run: Run = {
         id: randomUUID(),
         ...(thread === undefined ? {} : { conversationId: thread, turnIndex: turns.length, context: context?.summary }),
@@ -299,6 +350,9 @@ export function createRunService(
         folder: mode === "code" ? folder : undefined,
         ...(edit ? { edit: true } : {}),
         ...(worktree ? { worktree: { ...worktree } } : {}),
+        ...(workflowRunId === undefined ? {} : { workflowRunId }),
+        ...(modelOverride ? { modelOverride } : {}),
+        ...(timeoutMs === undefined ? {} : { timeoutMs }),
         prompt,
         startedAt: new Date().toISOString(),
         status: "running",
