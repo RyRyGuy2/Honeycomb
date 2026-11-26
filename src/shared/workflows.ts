@@ -167,8 +167,10 @@ export function validateWorkflow(value: unknown): WorkflowDefinition {
   return { id, name, description, steps };
 }
 
+/** Copies only the definition fields, so store metadata like `updatedAt` never leaks into an edit draft. */
 export function cloneWorkflow(workflow: WorkflowDefinition): WorkflowDefinition {
-  return JSON.parse(JSON.stringify(workflow)) as WorkflowDefinition;
+  const { id, name, description, steps } = workflow;
+  return JSON.parse(JSON.stringify({ id, name, description, steps })) as WorkflowDefinition;
 }
 
 export function workflowRequiresProject(workflow: WorkflowDefinition) {

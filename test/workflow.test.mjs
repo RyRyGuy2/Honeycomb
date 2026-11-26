@@ -8,7 +8,7 @@ import { workflowPlanPrompt, workflowPlanReply } from "../dist/service/workflow-
 import { createWorkflowRunStore } from "../dist/service/workflow-runs.js";
 import { createWorkflowStore } from "../dist/service/workflows.js";
 import {
-  MAX_HANDOFF, MAX_STEP_PROMPT, resolveWorkflowCommand, runSummary, validateWorkflow, workflowStepPrompt,
+  MAX_HANDOFF, MAX_STEP_PROMPT, cloneWorkflow, resolveWorkflowCommand, runSummary, validateWorkflow, workflowStepPrompt,
 } from "../dist/shared/workflows.js";
 
 const project = { name: "Example", path: process.cwd() };
@@ -194,6 +194,11 @@ test("definitions save in the app workflow library without a project", async (t)
   const written = JSON.parse(await readFile(file, "utf8"));
   assert.deepEqual(written, validateWorkflow(workflow()));
   assert.equal((await store.list()).length, 1);
+
+  // Editing a saved workflow copies only the definition, so store metadata cannot be saved back.
+  const draft = cloneWorkflow((await store.list())[0]);
+  assert.equal("updatedAt" in draft, false);
+  assert.equal((await store.save(draft)).name, "Plan and build");
 
   await writeFile(join(directory, "workflows", "broken.json"), "{}", "utf8");
   assert.equal((await store.list()).length, 1);
