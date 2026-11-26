@@ -103,24 +103,37 @@ test("validation keeps a blank model and trims the definition", () => {
 });
 
 test("the workflow planner validates available models and keeps the draft identity on revision", () => {
-  const catalogs = new Map([["codex", ["gpt-example"]]]);
-  const definition = { name: "Review docs", steps: [agent({ model: "gpt-example" }), gate()] };
+  const catalogs = new Map([["codex", { models: [
+    { id: "gpt-6.2-sol", efforts: ["high", "xhigh"] },
+    { id: "gpt-6.2-astra" }, { id: "gpt-6.1-terra" }, { id: "gpt-6.1-sol" },
+    { id: "gpt-5.6-terra", efforts: ["medium", "high"] },
+  ] }]]);
+  const definition = { name: "Review docs", steps: [agent({ model: "gpt-5.6-terra", effort: "medium" }), gate()] };
   const usage = { inputTokens: 103, outputTokens: 72 };
   function reply(workflow) {
     const body = JSON.stringify({ reply: "Drafted a review workflow.", workflow });
     return { status: "completed", usage, events: [{ type: "message", text: "```json\n" + body + "\n```" }] };
   }
   const first = workflowPlanReply(reply(definition), catalogs);
-  assert.equal(first.workflow.steps[0].model, "gpt-example");
+  assert.equal(first.workflow.steps[0].model, "gpt-5.6-terra");
+  assert.equal(first.workflow.steps[0].effort, "medium");
   assert.deepEqual(first.usage, usage);
   assert.equal(workflowPlanReply(reply(definition), catalogs, first.workflow).workflow.id, first.workflow.id);
   assert.equal(workflowPlanReply(reply(null), catalogs).workflow, undefined);
   assert.throws(() => workflowPlanReply(reply({ ...definition, steps: [agent({ model: "invented-model" })] }), catalogs),
     /unavailable connector or model/);
-  const prompt = workflowPlanPrompt("x".repeat(2_000), catalogs, first.workflow, "Earlier decision");
-  assert.ok(prompt.length < 8_000);
-  assert.match(prompt, /gpt-example/);
+  assert.throws(() => workflowPlanReply(reply({ ...definition, steps: [agent({ model: "gpt-5.6-terra", effort: "minimal" })] }), catalogs),
+    /unsupported thinking effort/);
+  const prompt = workflowPlanPrompt("x".repeat(2_000), catalogs,
+    { ...first.workflow, steps: [agent({ prompt: "x".repeat(3_000) }), gate({ title: "Preserve this gate" })] }, "Earlier decision");
+  assert.match(prompt, /"id":"gpt-5\.6-terra","efforts":\["medium","high"\]/);
+  assert.match(prompt, /"id":"gpt-6\.2-sol","efforts":\["high","xhigh"\]/);
+  assert.match(prompt, /"effort":""/);
+  assert.match(prompt, /Preserve this gate/);
   assert.match(prompt, /Earlier decision/);
+  catalogs.set("freebuff", { models: [] });
+  const manual = workflowPlanReply(reply({ ...definition, steps: [agent({ providerId: "freebuff", mode: "chat" })] }), catalogs);
+  assert.equal(manual.workflow.steps[0].providerId, "freebuff");
 });
 
 test("validation refuses fields that would turn a definition into a program", () => {
@@ -134,7 +147,8 @@ test("validation refuses fields that would turn a definition into a program", ()
 });
 
 test("validation enforces connectors, ordering and limits", () => {
-  assert.throws(() => validateWorkflow(workflow({ steps: [agent({ providerId: "gemini" })] })), /Codex, OpenCode or Claude Code/);
+  assert.throws(() => validateWorkflow(workflow({ steps: [agent({ providerId: "gemini" })] })), /supported workflow connector/);
+  assert.throws(() => validateWorkflow(workflow({ steps: [agent({ providerId: "freebuff" })] })), /use Chat for Freebuff/);
   assert.equal(validateWorkflow(workflow({ steps: [agent({ edit: true, providerId: "opencode" })] })).steps[0].edit, true);
   assert.throws(() => validateWorkflow(workflow({ steps: [agent({ mode: "chat", edit: true })] })), /only edit in Code/);
   assert.throws(() => validateWorkflow(workflow({ steps: [gate({ feedbackStepId: "missing" })] })), /earlier step/);
@@ -284,6 +298,50 @@ test("runner runs steps in order and hands results to the next step", async () =
   assert.equal(record.currentIndex, 2);
 });
 
+test("a Freebuff subagent copies its prompt, waits for a reply, and hands that reply to the next step", async () => {
+  const runs = fakeRuns();
+  const copied = [];
+  const runner = createWorkflowRunner({ runs, onFreebuffHandoff: (prompt) => copied.push(prompt) });
+  const definition = validateWorkflow(workflow({ steps: [
+    agent({ id: "draft", mode: "chat" }),
+    agent({ id: "freebuff-review", providerId: "freebuff", mode: "chat", inputs: ["draft"] }),
+    agent({ id: "final", mode: "chat", inputs: ["freebuff-review"] }),
+  ] }));
+  const runId = runner.start(undefined, definition, "Focus on accessibility.");
+  const record = runner.find(runId);
+  const handoff = { runId, stepId: "freebuff-review" };
+  runs.finish(runs.requests[0].id, "completed", { message: "Initial draft" });
+  await until(() => record.status === "waiting");
+  assert.equal(runs.requests.length, 1);
+  assert.equal(copied.length, 1);
+  assert.equal(runner.freebuffPrompt(handoff), copied[0]);
+  assert.match(copied[0], /Focus on accessibility\./);
+  assert.match(copied[0], /Initial draft/);
+  assert.throws(() => runner.submitFreebuffReply({ ...handoff, reply: " " }), /Paste a Freebuff reply/);
+  assert.throws(() => runner.freebuffPrompt({ ...handoff, stepId: "draft" }), /no longer waiting/);
+  runner.submitFreebuffReply({ ...handoff, reply: "Check keyboard focus." });
+  await until(() => runs.requests.length === 2);
+  assert.match(runs.requests[1].request.prompt, /Check keyboard focus\./);
+  assert.equal(record.steps[1].freebuffReply, "Check keyboard focus.");
+  assert.throws(() => runner.submitFreebuffReply({ ...handoff, reply: "Duplicate" }), /no longer waiting/);
+  runs.finish(runs.requests[1].id, "completed");
+  await until(() => record.status === "completed");
+});
+
+test("stopping a Freebuff handoff cancels the workflow without a reply", async () => {
+  const runs = fakeRuns();
+  const runner = createWorkflowRunner({ runs });
+  const runId = runner.start(undefined, validateWorkflow(workflow({ steps: [
+    agent({ providerId: "freebuff", mode: "chat" }),
+  ] })));
+  await runner.stop(runId);
+  const record = runner.find(runId);
+  assert.equal(record.status, "cancelled");
+  assert.equal(record.steps[0].status, "cancelled");
+  assert.equal(runs.requests.length, 0);
+  assert.throws(() => runner.freebuffPrompt({ runId, stepId: "plan" }), /no longer waiting/);
+});
+
 test("rejection sends bounded feedback to the named earlier step", async () => {
   const runs = fakeRuns();
   const runner = createWorkflowRunner({ runs });
@@ -313,6 +371,55 @@ test("rejection sends bounded feedback to the named earlier step", async () => {
   assert.deepEqual(record.steps[0].usage, record.usage);
 });
 
+test("an automatic gate reruns the worker and judge, then delivers the accepted result", async () => {
+  const runs = fakeRuns();
+  const runner = createWorkflowRunner({ runs });
+  const definition = validateWorkflow(workflow({ steps: [
+    agent({ mode: "chat", model: "gpt-5.6-terra", effort: "medium" }),
+    agent({ id: "judge", mode: "chat", model: "gpt-6.2-sol", effort: "xhigh", inputs: ["plan"] }),
+    gate({ judgeStepId: "judge" }),
+    agent({ id: "deliver", mode: "chat", inputs: ["plan"] }),
+  ] }));
+  const id = runner.start(undefined, definition);
+  assert.equal(runs.requests[0].request.effort, "medium");
+  runs.finish(runs.requests[0].id, "completed", { message: "First answer" });
+  await until(() => runs.requests.length === 2);
+  assert.equal(runs.requests[1].request.effort, "xhigh");
+  assert.match(runs.requests[1].request.prompt, /First answer[\s\S]*Return only a JSON object/);
+  runs.finish(runs.requests[1].id, "completed", { message: '{"decision":"rejected","feedback":"Add examples."}' });
+  await until(() => runs.requests.length === 3);
+  assert.match(runs.requests[2].request.prompt, /Add examples\.[\s\S]*First answer/);
+  runs.finish(runs.requests[2].id, "completed", { message: "Revised answer" });
+  await until(() => runs.requests.length === 4);
+  assert.match(runs.requests[3].request.prompt, /Revised answer/);
+  runs.finish(runs.requests[3].id, "completed", { message: '{"decision":"approved","feedback":""}' });
+  await until(() => runs.requests.length === 5);
+  assert.match(runs.requests[4].request.prompt, /Revised answer/);
+  runs.finish(runs.requests[4].id, "completed", { message: "Delivered answer" });
+  await until(() => runner.find(id).status === "completed");
+  assert.equal(runner.find(id).steps[2].revisions, 1);
+});
+
+test("an automatic gate fails on an invalid verdict or exhausted revisions", async () => {
+  for (const [verdict, expected] of [
+    ["Looks good", /invalid verdict/],
+    ['{"decision":"rejected","feedback":"Try again."}', /Revision limit reached/],
+  ]) {
+    const runs = fakeRuns();
+    const runner = createWorkflowRunner({ runs });
+    const id = runner.start(project, validateWorkflow(workflow({ steps: [
+      agent(), agent({ id: "judge", inputs: ["plan"] }), gate({ judgeStepId: "judge", maxRevisions: 0 }),
+    ] })));
+    runs.finish(runs.requests[0].id, "completed", { message: "First answer" });
+    await until(() => runs.requests.length === 2);
+    runs.finish(runs.requests[1].id, "completed", { message: verdict });
+    await until(() => runner.find(id).status === "failed");
+    assert.match(runner.find(id).error, expected);
+    assert.equal(runner.find(id).steps[2].status, "failed");
+    assert.equal(runs.requests.length, 2);
+  }
+});
+
 test("an edit step creates one worktree and later steps reuse it", async () => {
   const runs = fakeRuns();
   const runner = createWorkflowRunner({ runs });
@@ -325,6 +432,7 @@ test("an edit step creates one worktree and later steps reuse it", async () => {
         prompt: "Build it.", inputs: ["plan"],
       }),
       agent({ id: "polish", title: "Polish", providerId: "codex", prompt: "Polish it.", inputs: ["build"] }),
+      agent({ id: "revise", title: "Revise", edit: true, inputs: ["polish"] }),
     ],
   }));
   const id = runner.start(project, definition);
@@ -351,7 +459,13 @@ test("an edit step creates one worktree and later steps reuse it", async () => {
   assert.match(polish.prompt, /Built/);
   assert.equal(runner.find(id).worktree.id, worktree.id);
 
-  runs.finish(runs.requests[2].id, "completed");
+  runs.finish(runs.requests[2].id, "completed", { message: "Reviewed." });
+  await until(() => runs.requests.length === 4, "the revision step");
+  const revision = runs.requests[3].request;
+  assert.equal(revision.worktreeId, worktree.id);
+  assert.equal(revision.edit, true);
+  assert.match(revision.prompt, /Reviewed/);
+  runs.finish(runs.requests[3].id, "completed");
   await until(() => runner.find(id).status === "completed");
 });
 

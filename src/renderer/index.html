@@ -55,6 +55,11 @@
         <button type="button" id="choose-folder" class="button sidebar-action">
           <span aria-hidden="true">+</span> Add project
         </button>
+        <section id="chat-workflow-outline" class="chat-workflow-outline" aria-label="Workflow outline" hidden></section>
+        <section id="chat-workflow-history" class="sidebar-section" aria-labelledby="chat-workflow-history-title" hidden>
+          <h3 id="chat-workflow-history-title">Workflow runs</h3>
+          <div id="chat-workflow-list" class="run-list"></div>
+        </section>
         <div class="sidebar-section run-history">
           <h3 id="history-title">Projects</h3>
           <div id="run-list" class="run-list"></div>
@@ -97,7 +102,7 @@
     <main id="chats" class="workspace">
       <section class="chat-pane" aria-labelledby="chat-title">
         <div class="chat-header">
-          <h1 id="chat-title">New task</h1>
+          <h1 id="chat-title" tabindex="-1">New task</h1>
           <button type="button" id="stop-run" class="button button-small" hidden>Stop run</button>
         </div>
         <div id="thread" class="thread">
@@ -116,9 +121,10 @@
           </div>
           <div id="feed" class="feed" hidden></div>
           <div id="freebuff-handoffs" class="feed" hidden></div>
+          <div id="chat-workflow-feed" class="feed" hidden></div>
         </div>
 
-        <div class="composer-area">
+        <div id="composer-area" class="composer-area">
           <div id="composer-project-bar" class="composer-project-bar" hidden>
             <span class="folder-icon" aria-hidden="true"></span>
             <label class="visually-hidden" for="composer-project-picker">Project for this chat</label>
@@ -204,7 +210,10 @@
         <div id="workflow-plan-messages" class="feed" aria-live="polite"></div>
         <form id="workflow-plan-form" class="connector-card">
           <div class="workflow-field-row">
-            <label class="model-field">Planner connector<select id="workflow-plan-provider" class="connector-input"></select></label>
+            <label class="model-field">
+              <span class="planner-connector-label">Planner connector<span id="workflow-plan-loading" class="loading-icon" aria-hidden="true" hidden></span></span>
+              <select id="workflow-plan-provider" class="connector-input"></select>
+            </label>
             <label class="model-field">Model<select id="workflow-plan-model" class="connector-input"></select></label>
           </div>
           <label class="model-field" for="workflow-plan-goal">Goal or follow-up

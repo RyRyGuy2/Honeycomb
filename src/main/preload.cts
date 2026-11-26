@@ -51,6 +51,8 @@ const api: HoneycombApi = {
   runWorkflowCommand: (request) => invoke("run-workflow-command", request),
   stopWorkflow: (runId) => invoke("stop-workflow", runId),
   decideWorkflow: (request) => invoke("workflow-decision", request),
+  copyWorkflowFreebuff: (request) => invoke("copy-workflow-freebuff", request),
+  submitWorkflowFreebuff: (request) => invoke("submit-workflow-freebuff", request),
   onRunChanged(callback) {
     const listener = (_event: IpcRendererEvent, run: Run) => callback(run);
     ipcRenderer.on("honeycomb:run-changed", listener);

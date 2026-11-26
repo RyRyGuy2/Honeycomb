@@ -27,7 +27,9 @@ Use **Settings → Factory reset** to clear Honeycomb’s local history, saved w
 
 Choose **Plan a workflow** in Workflows to draft and refine a plan. Saved workflows live in Honeycomb’s app data and can be saved without a project. Honeycomb imports existing workflow files from projects already in its saved project list.
 
-In Chats, type `/workflow "Review changes" Focus on the import flow` to run a saved workflow by name. You can also use its ID. Honeycomb passes the prompt to its subagents and opens the run timeline. Workflows with Code steps use the project selected in Code. Chat-only workflows can run without a project. Honeycomb shows token counts and costs when a provider reports them.
+In Chats, type `/workflow "Review changes" Focus on the import flow` to run a saved workflow by name. You can also use its ID. The Chats sidebar opens a workflow outline with live step status, and the conversation shows the final reply. The full timeline and reported token counts and costs are available in Workflows. Code steps use the project selected in Code. Editing steps share a Git worktree, where later Code steps can review or revise the changes. Chat steps run without project access.
+
+Choose **Freebuff** as a subagent for a manual handoff. When the workflow reaches that step, Honeycomb copies the prompt and pauses. Paste and send the prompt in Freebuff, then paste the completed reply into the workflow timeline and choose **Submit reply and continue**.
 
 ### Chat connectors
 

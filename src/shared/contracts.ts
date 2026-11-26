@@ -187,11 +187,13 @@ export interface StartRunRequest {
 export type WorkflowStepKind = "agent" | "gate";
 
 /** One connector run inside a workflow. */
+export type WorkflowProviderId = CliProviderId | "freebuff";
+
 export interface WorkflowAgentStep {
   id: string;
   kind: "agent";
   title: string;
-  providerId: CliProviderId;
+  providerId: WorkflowProviderId;
   /** Blank uses the connector's own model selection. */
   model: string;
   /** Blank uses the connector default thinking level. */
@@ -207,13 +209,15 @@ export interface WorkflowAgentStep {
   timeoutMs: number;
 }
 
-/** A human decision point between agent steps. */
+/** A decision point between agent steps. */
 export interface WorkflowGateStep {
   id: string;
   kind: "gate";
   title: string;
   /** Earlier agent step that receives a rejection. */
   feedbackStepId: string;
+  /** Earlier agent whose verdict drives the gate. Omit for human review. */
+  judgeStepId?: string;
   maxRevisions: number;
 }
 
@@ -244,6 +248,7 @@ export interface WorkflowStepRun {
   /** Rejections handled at this gate. */
   revisions?: number;
   detail?: string;
+  freebuffReply?: string;
   usage?: RunUsage;
 }
 
@@ -346,6 +351,8 @@ export interface IpcCalls {
   "run-workflow-command": (request: { argument: string; projectPath?: string }) => string;
   "stop-workflow": (runId: string) => void;
   "workflow-decision": (request: WorkflowDecisionRequest) => void;
+  "copy-workflow-freebuff": (request: { runId: string; stepId: string }) => void;
+  "submit-workflow-freebuff": (request: { runId: string; stepId: string; reply: string }) => void;
 }
 
 type Invoke<Channel extends keyof IpcCalls> =
@@ -391,6 +398,8 @@ export interface HoneycombApi {
   runWorkflowCommand: Invoke<"run-workflow-command">;
   stopWorkflow: Invoke<"stop-workflow">;
   decideWorkflow: Invoke<"workflow-decision">;
+  copyWorkflowFreebuff: Invoke<"copy-workflow-freebuff">;
+  submitWorkflowFreebuff: Invoke<"submit-workflow-freebuff">;
   onRunChanged(callback: (run: Run) => void): () => void;
   onWorkflowChanged(callback: (change: WorkflowChange) => void): () => void;
 }

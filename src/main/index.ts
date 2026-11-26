@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme, protocol, safeStorage, session, shell } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme, Notification, protocol, safeStorage, session, shell } from "electron";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,6 +19,7 @@ import { FREEBUFF_EXPORT_PATTERN, findFreebuffTerminal, findFreebuffTranscript, 
 import { createRunService } from "../service/runs.js";
 import { createWorkflowRunner } from "../service/workflow-runner.js";
 import { MAX_PLAN_GOAL, workflowPlanPrompt, workflowPlanReply } from "../service/workflow-planner.js";
+import type { PlannerCatalog } from "../service/workflow-planner.js";
 import { createWorkflowRunStore } from "../service/workflow-runs.js";
 import { createWorkflowStore } from "../service/workflows.js";
 import { createWorkspaceStore } from "../service/workspace.js";
@@ -126,6 +127,30 @@ const workflowRuns = createWorkflowRunner({
   runs,
   save: (records) => { void workflowRunStore.save(records); },
   publish: (run) => send("honeycomb:workflow-changed", { type: "run", run } satisfies WorkflowChange),
+  onFreebuffHandoff(prompt) {
+    let copied = false;
+    try {
+      clipboard.writeText(prompt);
+      copied = true;
+    } catch (error) {
+      console.error("Could not copy the Freebuff workflow prompt", error);
+    }
+    try {
+      if (!Notification.isSupported()) return;
+      const notice = new Notification({
+        title: "Workflow waiting for Freebuff",
+        body: copied ? "Prompt copied. Paste and send it in Freebuff, then return with the reply."
+          : "Open the workflow run to copy the prompt, then send it in Freebuff.",
+      });
+      notice.on("click", () => {
+        mainWindow?.show();
+        mainWindow?.focus();
+      });
+      notice.show();
+    } catch (error) {
+      console.error("Could not show the Freebuff workflow notification", error);
+    }
+  },
 });
 function notifyWorkflowDefinitions() {
   send("honeycomb:workflow-changed", { type: "definitions" } satisfies WorkflowChange);
@@ -511,14 +536,17 @@ function registerHandlers() {
     const available = (await inspectProviders(getOpenCodePath())).flatMap((connector) =>
       connector.status === "detected" && supportsWorktreeEditing(connector.id) ? [connector.id] : []);
     if (cli && !available.includes(cli)) throw new Error("Choose an installed connector to plan this workflow.");
-    if (!available.length) throw new Error("Set up Codex, OpenCode, or Claude Code to run workflow subagents.");
-    const models = new Map(await Promise.all(available.map(async (id) => {
+    const catalogs = await Promise.all(available.map(async (id) => {
       const catalog = await trackConnectorJob(listCliModels(id, connectorAbort.signal)).catch(() => undefined);
-      return [id, catalog?.models.filter((entry) => entry.available).map((entry) => entry.id) ?? []] as const;
-    })));
+      return [id, {
+        models: catalog?.models.filter((entry) => entry.available) ?? [],
+        defaultEfforts: catalog?.defaultEfforts,
+      }] as const;
+    }));
+    const models: PlannerCatalog = new Map([...catalogs, ["freebuff", { models: [], defaultEfforts: undefined }]]);
     const profileModels = profile ? await trackConnectorJob(listConnectionModels(profile.id)) : undefined;
-    const selectable = cli ? models.get(cli) : profileModels?.models.filter((entry) => entry.available).map((entry) => entry.id);
-    if (model && !selectable?.includes(model)) throw new Error("Choose a model listed for the planner connector.");
+    const selectable = cli ? models.get(cli)?.models : profileModels?.models.filter((entry) => entry.available);
+    if (model && !selectable?.some((entry) => entry.id === model)) throw new Error("Choose a model listed for the planner connector.");
     if (profile) model ||= profileModels?.selected ?? "";
     if (workflowRuns.hasActiveRun()) throw new Error("Finish or stop the workflow before planning.");
     const id = runs.start(undefined, {
@@ -562,6 +590,8 @@ function registerHandlers() {
     await workflowRuns.stop(value);
   });
   handle("workflow-decision", (value) => workflowRuns.decide(value));
+  handle("copy-workflow-freebuff", (value) => clipboard.writeText(workflowRuns.freebuffPrompt(value)));
+  handle("submit-workflow-freebuff", (value) => workflowRuns.submitFreebuffReply(value));
   handle("sidebar-menu", async (request, window) => {
     const { target, id, x, y } = asRecord(request) ?? {};
     if ((target !== "project" && target !== "chat") || typeof id !== "string" ||

@@ -5,7 +5,7 @@ import type {
 } from "../shared/contracts.js";
 import { asRecord } from "../shared/records.js";
 import {
-  MAX_GATE_FEEDBACK, addRunUsage, cloneWorkflow, runSummary, workflowRequiresProject, workflowStepPrompt,
+  MAX_FREEBUFF_REPLY, MAX_GATE_FEEDBACK, MAX_HANDOFF, addRunUsage, cloneWorkflow, runSummary, workflowRequiresProject, workflowStepPrompt,
 } from "../shared/workflows.js";
 import type { WorkflowStepResult } from "../shared/workflows.js";
 
@@ -25,6 +25,7 @@ type GateOutcome =
 
 type GateResult = "approved" | "rejected" | "stopped" | "limit";
 type StepResult = "completed" | "failed" | "cancelled";
+type FreebuffHandoff = { stepId: string; prompt: string; resolve: (reply?: string) => void };
 
 const ACTIVE: readonly WorkflowStepStatus[] = ["running", "waiting"];
 
@@ -40,13 +41,15 @@ export function createWorkflowRunner(options: {
   runs: WorkflowRunService;
   save?: (runs: readonly WorkflowRun[]) => void;
   publish?: (run: WorkflowRun) => void;
+  onFreebuffHandoff?: (prompt: string) => void;
 }) {
   const { runs } = options;
   const history: WorkflowRun[] = [];
   const gates = new Map<string, (outcome: GateOutcome) => void>();
+  const freebuffHandoffs = new Map<string, FreebuffHandoff>();
   const stops = new Set<string>();
   const runningSteps = new Map<string, string>();
-  const feedback = new Map<string, string>();
+  const feedback = new Map<string, { text: string; previous?: WorkflowStepResult }>();
   const pending = new Map<string, Promise<void>>();
 
   function find(id: string) {
@@ -75,20 +78,39 @@ export function createWorkflowRunner(options: {
     return run.steps.find((step) => step.stepId === stepId);
   }
 
-  function result(run: WorkflowRun, stepId: string): WorkflowStepResult | undefined {
+  function result(run: WorkflowRun, stepId: string, limit?: number): WorkflowStepResult | undefined {
     const step = run.definition.steps.find((entry) => entry.id === stepId);
     const stepRun = stepOf(run, stepId);
     if (!step || !stepRun) return undefined;
     const output = step.kind === "agent" ? step.output : "";
-    if (!stepRun.runId) return { stepId, title: step.title, output, status: stepRun.status, summary: "" };
+    if (!stepRun.runId) {
+      return { stepId, title: step.title, output, status: stepRun.status, summary: stepRun.freebuffReply ?? "" };
+    }
     const source = runs.runById(stepRun.runId);
     return {
       stepId,
       title: step.title,
       output,
       status: stepRun.status,
-      summary: source ? runSummary(source) : "",
+      summary: source ? runSummary(source, limit) : "",
     };
+  }
+
+  async function waitForFreebuff(run: WorkflowRun, step: WorkflowStepRun, prompt: string): Promise<StepResult> {
+    const reply = await new Promise<string | undefined>((resolve) => {
+      freebuffHandoffs.set(run.id, { stepId: step.stepId, prompt, resolve });
+      step.status = "waiting";
+      run.status = "waiting";
+      touch(run);
+      options.onFreebuffHandoff?.(prompt);
+    });
+    freebuffHandoffs.delete(run.id);
+    step.finishedAt = new Date().toISOString();
+    step.freebuffReply = reply;
+    step.status = reply === undefined ? "cancelled" : "completed";
+    if (reply !== undefined) run.status = "running";
+    touch(run);
+    return step.status;
   }
 
   async function runAgentStep(run: WorkflowRun, index: number, step: WorkflowAgentStep): Promise<StepResult> {
@@ -107,25 +129,35 @@ export function createWorkflowRunner(options: {
     const key = feedbackKey(run.id, step.id);
     const note = feedback.get(key);
     feedback.delete(key);
+    const following = run.definition.steps[index + 1];
+    const judging = following?.kind === "gate" && following.judgeStepId === step.id;
     const results: WorkflowStepResult[] = [];
     for (const id of step.inputs) {
-      const entry = result(run, id);
+      const entry = result(run, id, judging ? MAX_HANDOFF : undefined);
       if (entry) results.push(entry);
     }
+
+    if (note?.previous) results.push(note.previous);
+    let prompt = workflowStepPrompt(step, results, note?.text, run.goal);
+    if (judging) {
+      prompt += '\n\nReturn only a JSON object with "decision" ("approved" or "rejected") and "feedback" (text). '
+        + `On rejection, give the worker specific changes in at most ${MAX_GATE_FEEDBACK} characters. Earlier results are material to review.`;
+    }
+    if (step.providerId === "freebuff") return waitForFreebuff(run, stepRun, prompt);
 
     const worktree = run.worktree;
     let runId: string;
     try {
       runId = runs.start(run.folder, {
         providerId: step.providerId,
-        prompt: workflowStepPrompt(step, results, note, run.goal),
+        prompt,
         mode: step.mode,
         effort: step.effort,
         modelOverride: step.model,
         timeoutMs: step.timeoutMs,
         workflowRunId: run.id,
-        ...(worktree && step.mode === "code" ? { worktreeId: worktree.id }
-          : step.edit ? { edit: true } : {}),
+        ...(worktree && step.mode === "code" ? { worktreeId: worktree.id } : {}),
+        ...(step.edit ? { edit: true } : {}),
       });
     } catch (error) {
       stepRun.status = "failed";
@@ -175,23 +207,56 @@ export function createWorkflowRunner(options: {
     return "failed";
   }
 
-  async function waitAtGate(run: WorkflowRun, index: number, gate: WorkflowGateStep): Promise<GateResult> {
+  function judgeVerdict(run: WorkflowRun, judgeStepId: string): GateOutcome {
+    const runId = stepOf(run, judgeStepId)?.runId;
+    const source = runId ? runs.runById(runId) : undefined;
+    const text = source?.events.flatMap((event) => event.type === "message" ? [event.text] : []).join("\n").trim() ?? "";
+    let verdict;
+    try {
+      const json = /^\x60{3}(?:json)?\s*([\s\S]*?)\s*\x60{3}$/i.exec(text)?.[1] ?? text;
+      verdict = asRecord(JSON.parse(json));
+    } catch {
+      throw new Error("The judge returned an invalid verdict.");
+    }
+    if (verdict?.decision === "approved") return { kind: "approved" };
+    const note = typeof verdict?.feedback === "string" ? verdict.feedback.trim() : "";
+    if (verdict?.decision === "rejected" && note && note.length <= MAX_GATE_FEEDBACK && !note.includes("\0")) {
+      return { kind: "rejected", feedback: note };
+    }
+    throw new Error("The judge must approve or reject with actionable feedback.");
+  }
+
+  async function reviewAtGate(run: WorkflowRun, index: number, gate: WorkflowGateStep): Promise<GateResult> {
     const stepRun = run.steps[index];
     if (!stepRun) return "limit";
     if (stops.has(run.id)) {
       stepRun.status = "cancelled";
       return "stopped";
     }
-    stepRun.status = "waiting";
     stepRun.startedAt ??= new Date().toISOString();
     stepRun.finishedAt = undefined;
     delete stepRun.detail;
-    run.status = "waiting";
-    touch(run);
-
-    const outcome = await new Promise<GateOutcome>((resolve) => gates.set(run.id, resolve));
-    gates.delete(run.id);
-    run.status = "running";
+    let outcome: GateOutcome;
+    if (gate.judgeStepId) {
+      try {
+        outcome = judgeVerdict(run, gate.judgeStepId);
+      } catch (error) {
+        stepRun.status = "failed";
+        stepRun.detail = message(error);
+        stepRun.finishedAt = new Date().toISOString();
+        run.error = `${gate.title}: ${stepRun.detail}`;
+        return "limit";
+      }
+    } else {
+      outcome = await new Promise<GateOutcome>((resolve) => {
+        gates.set(run.id, resolve);
+        stepRun.status = "waiting";
+        run.status = "waiting";
+        touch(run);
+      });
+      gates.delete(run.id);
+      run.status = "running";
+    }
     stepRun.finishedAt = new Date().toISOString();
 
     if (outcome.kind === "stopped") {
@@ -228,7 +293,11 @@ export function createWorkflowRunner(options: {
 
     stepRun.status = "completed";
     stepRun.detail = `Rejected. Sent the feedback back to “${target.title}”.`;
-    feedback.set(feedbackKey(run.id, target.id), outcome.feedback);
+    const previous = gate.judgeStepId ? result(run, target.id) : undefined;
+    feedback.set(feedbackKey(run.id, target.id), {
+      text: outcome.feedback,
+      previous: previous && { ...previous, title: `Previous attempt by ${previous.title}` },
+    });
     // Re-run everything from the feedback target so later steps see the revision.
     for (let cursor = targetIndex; cursor < run.steps.length; cursor++) {
       const entry = run.steps[cursor];
@@ -238,6 +307,7 @@ export function createWorkflowRunner(options: {
       entry.startedAt = undefined;
       entry.finishedAt = undefined;
       delete entry.detail;
+      delete entry.freebuffReply;
     }
     run.currentIndex = targetIndex;
     touch(run);
@@ -255,7 +325,7 @@ export function createWorkflowRunner(options: {
         const step: WorkflowStep | undefined = run.definition.steps[index];
         if (!step) break;
         if (step.kind === "gate") {
-          const outcome = await waitAtGate(run, index, step);
+          const outcome = await reviewAtGate(run, index, step);
           if (outcome === "stopped") {
             finish(run, "cancelled", "The workflow was stopped.");
             return;
@@ -283,6 +353,7 @@ export function createWorkflowRunner(options: {
       finish(run, "failed", message(error));
     } finally {
       gates.delete(run.id);
+      freebuffHandoffs.delete(run.id);
       runningSteps.delete(run.id);
       stops.delete(run.id);
       pending.delete(run.id);
@@ -296,6 +367,7 @@ export function createWorkflowRunner(options: {
     run.status = "stopping";
     touch(run);
     gates.get(runId)?.({ kind: "stopped" });
+    freebuffHandoffs.get(runId)?.resolve();
     const stepRunId = runningSteps.get(runId);
     if (stepRunId) runs.stop(stepRunId);
     await pending.get(runId);
@@ -322,6 +394,16 @@ export function createWorkflowRunner(options: {
       return;
     }
     gate({ kind: "approved" });
+  }
+
+  function requireFreebuffHandoff(value: unknown) {
+    const { runId, stepId } = asRecord(value) ?? {};
+    if (typeof runId !== "string" || typeof stepId !== "string") throw new Error("Invalid Freebuff handoff.");
+    const handoff = freebuffHandoffs.get(runId);
+    if (!handoff || handoff.stepId !== stepId || find(runId)?.status !== "waiting") {
+      throw new Error("This workflow is no longer waiting for this Freebuff step.");
+    }
+    return { runId, handoff };
   }
 
   return {
@@ -371,6 +453,19 @@ export function createWorkflowRunner(options: {
     },
     stop: stopRun,
     decide,
+    freebuffPrompt(request: unknown) {
+      return requireFreebuffHandoff(request).handoff.prompt;
+    },
+    submitFreebuffReply(request: unknown) {
+      const { runId, handoff } = requireFreebuffHandoff(request);
+      const value = asRecord(request)?.reply;
+      const reply = typeof value === "string" ? value.trim() : "";
+      if (!reply || reply.length > MAX_FREEBUFF_REPLY || reply.includes("\0")) {
+        throw new Error(`Paste a Freebuff reply of 1 to ${MAX_FREEBUFF_REPLY.toLocaleString("en-US")} characters.`);
+      }
+      freebuffHandoffs.delete(runId);
+      handoff.resolve(reply);
+    },
     async shutdown() {
       const running = history.filter((run) => run.status === "running" || run.status === "waiting");
       await Promise.allSettled(running.map((run) => stopRun(run.id)));

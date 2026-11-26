@@ -15,6 +15,7 @@ import type {
 import { compareTurns, conversationContext, conversationId, followUpPrompt, runMode } from "../shared/conversations.js";
 import { supportsWorktreeEditing } from "../shared/editing.js";
 import { asRecord } from "../shared/records.js";
+import { MAX_PLAN_PROMPT } from "./workflow-planner.js";
 import type { WorktreeManager } from "./worktree.js";
 
 const MAX_PROMPT_LENGTH = 8_000;
@@ -320,8 +321,10 @@ export function createRunService(
       const effort = provider ? parseEffort(payload?.effort, provider.id) : undefined;
       const chatModel = mode === "chat" && provider?.id === "codex" ? parseCodexModel(payload?.model ?? "") || undefined : undefined;
       const prompt = typeof payload?.prompt === "string" ? payload.prompt.trim() : "";
-      if (!prompt || prompt.length > MAX_PROMPT_LENGTH || prompt.includes("\0")) {
-        throw new Error(`Enter a task of 1 to ${MAX_PROMPT_LENGTH.toLocaleString("en-US")} characters.`);
+      const workflowPlanner = payload?.workflowPlanner === true && mode === "chat";
+      const maxPrompt = workflowPlanner ? MAX_PLAN_PROMPT : MAX_PROMPT_LENGTH;
+      if (!prompt || prompt.length > maxPrompt || prompt.includes("\0")) {
+        throw new Error(`Enter a task of 1 to ${maxPrompt.toLocaleString("en-US")} characters.`);
       }
 
       const edit = payload?.edit === true;
@@ -377,7 +380,7 @@ export function createRunService(
         ...(edit ? { edit: true } : {}),
         ...(worktree ? { worktree: { ...worktree } } : {}),
         ...(workflowRunId === undefined ? {} : { workflowRunId }),
-        ...(payload?.workflowPlanner === true && mode === "chat" ? { workflowPlanner: true as const } : {}),
+        ...(workflowPlanner ? { workflowPlanner: true as const } : {}),
         ...(modelOverride ? { modelOverride } : {}),
         ...(timeoutMs === undefined ? {} : { timeoutMs }),
         prompt,

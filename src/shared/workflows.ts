@@ -1,14 +1,15 @@
 import type {
-  CliProviderId, Run, RunUsage, WorkflowAgentStep, WorkflowDefinition, WorkflowGateStep, WorkflowStep,
+  Run, RunUsage, WorkflowAgentStep, WorkflowDefinition, WorkflowGateStep, WorkflowProviderId, WorkflowStep,
 } from "./contracts.js";
 import { supportsWorktreeEditing } from "./editing.js";
 
-export const WORKFLOW_PROVIDERS: readonly CliProviderId[] = ["codex", "opencode", "claude"];
+export const WORKFLOW_PROVIDERS: readonly WorkflowProviderId[] = ["codex", "opencode", "claude", "freebuff"];
 export const MAX_WORKFLOW_STEPS = 20;
 export const MAX_STEP_PROMPT = 4_000;
 export const MAX_HANDOFF = 3_500;
 export const MAX_WORKFLOW_GOAL = 2_000;
 export const MAX_GATE_FEEDBACK = 2_000;
+export const MAX_FREEBUFF_REPLY = 16_000;
 export const MAX_STEP_INPUTS = 8;
 export const MAX_GATE_REVISIONS = 5;
 export const MIN_STEP_TIMEOUT_MS = 30_000;
@@ -28,7 +29,7 @@ const WORKFLOW_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const AGENT_KEYS = [
   "id", "kind", "title", "providerId", "model", "effort", "mode", "edit", "prompt", "inputs", "output", "timeoutMs",
 ] as const;
-const GATE_KEYS = ["id", "kind", "title", "feedbackStepId", "maxRevisions"] as const;
+const GATE_KEYS = ["id", "kind", "title", "feedbackStepId", "judgeStepId", "maxRevisions"] as const;
 
 function fail(message: string): never {
   throw new Error(message);
@@ -59,9 +60,9 @@ function text(value: unknown, label: string, limit: number, required = false) {
   return trimmed;
 }
 
-function providerId(value: unknown, label: string): CliProviderId {
+function providerId(value: unknown, label: string): WorkflowProviderId {
   const id = WORKFLOW_PROVIDERS.find((entry) => entry === value);
-  if (!id) fail(`${label} must use Codex, OpenCode or Claude Code.`);
+  if (!id) fail(`${label} must use a supported workflow connector.`);
   return id;
 }
 
@@ -95,12 +96,17 @@ export function validateWorkflow(value: unknown): WorkflowDefinition {
 
     if (step.kind === "agent") {
       const provider = providerId(step.providerId, label);
-      const mode = step.mode ?? "code";
+      const mode = step.mode ?? (provider === "freebuff" ? "chat" : "code");
       if (mode !== "code" && mode !== "chat") fail(`${label} must use Code or Chat.`);
       const edit = step.edit === true;
+      const model = text(step.model, `${label} model`, MAX_MODEL);
+      const effort = text(step.effort, `${label} effort`, MAX_EFFORT);
       if (step.edit !== undefined && typeof step.edit !== "boolean") fail(`${label} edit must be true or false.`);
       if (edit && mode !== "code") fail(`${label} can only edit in Code mode.`);
       if (edit && !supportsWorktreeEditing(provider)) fail(`${label} uses a connector that cannot edit in a worktree.`);
+      if (provider === "freebuff" && (mode !== "chat" || model || effort)) {
+        fail(`${label} must use Chat for Freebuff. Choose its model and effort in Freebuff.`);
+      }
       const rawInputs = step.inputs ?? [];
       if (!Array.isArray(rawInputs)) fail(`${label} inputs must be a list of earlier steps.`);
       if (rawInputs.length > MAX_STEP_INPUTS) fail(`${label} can take at most ${MAX_STEP_INPUTS} inputs.`);
@@ -119,8 +125,8 @@ export function validateWorkflow(value: unknown): WorkflowDefinition {
         kind: "agent",
         title,
         providerId: provider,
-        model: text(step.model, `${label} model`, MAX_MODEL),
-        effort: text(step.effort, `${label} effort`, MAX_EFFORT),
+        model,
+        effort,
         mode,
         edit,
         prompt: text(step.prompt, `${label} prompt`, MAX_STEP_PROMPT, true),
@@ -135,12 +141,24 @@ export function validateWorkflow(value: unknown): WorkflowDefinition {
       if (!steps.some((entry) => entry.id === feedbackStepId && entry.kind === "agent")) {
         fail(`${label} must send feedback to an earlier agent step.`);
       }
+      const judgeStepId = text(step.judgeStepId, `${label} judge step`, MAX_ID);
+      if (judgeStepId) {
+        const judge = steps.at(-1);
+        if (judge?.kind !== "agent" || judge.id !== judgeStepId || judge.providerId === "freebuff" || judge.edit) {
+          fail(`${label} must follow a judging agent that runs automatically and cannot edit.`);
+        }
+        if (!judge.inputs.includes(feedbackStepId)) fail(`${label} requires the judge to take the worker's result as input.`);
+        const workerIndex = steps.findIndex((entry) => entry.id === feedbackStepId);
+        if (steps.slice(workerIndex).some((entry) => entry.kind === "gate")) {
+          fail(`${label} cannot loop back across another review gate.`);
+        }
+      }
       const maxRevisions = step.maxRevisions ?? DEFAULT_GATE_REVISIONS;
       if (typeof maxRevisions !== "number" || !Number.isInteger(maxRevisions) ||
           maxRevisions < 0 || maxRevisions > MAX_GATE_REVISIONS) {
         fail(`${label} can allow at most ${MAX_GATE_REVISIONS} revisions.`);
       }
-      steps.push({ id, kind: "gate", title, feedbackStepId, maxRevisions });
+      steps.push({ id, kind: "gate", title, feedbackStepId, ...(judgeStepId ? { judgeStepId } : {}), maxRevisions });
     }
     seen.add(id);
   }

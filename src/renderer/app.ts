@@ -1,7 +1,7 @@
 import type {
   ChatPresetId, ChatProfile, CliProviderId, Connector, ConnectorStatus, ConversationContextSummary, DiffFile, HoneycombApi, ModelCatalog, ModelSelection, ProjectFolder, ProviderId, Run, RunStatus,
   RunUsage, RunWorktree, SavedWorkflow, SidebarMenuRequest, WorkflowAgentStep, WorkflowDefinition, WorkflowGateStep, WorkflowRun, WorkflowRunStatus,
-  WorkflowPlanReply, WorkflowPlanRequest, WorkflowStep, WorkflowStepStatus, WorkspaceMode,
+  WorkflowPlanReply, WorkflowPlanRequest, WorkflowProviderId, WorkflowStep, WorkflowStepStatus, WorkspaceMode,
 } from "../shared/contracts.js";
 import { configuredConnectors } from "../shared/connectors.js";
 import { compareTurns, conversationContext, conversationId, runMode } from "../shared/conversations.js";
@@ -10,8 +10,8 @@ import { chatPresets, isChatPreset } from "../shared/chat-presets.js";
 import { copilotClipboardMarkdown, copilotCodeBlock } from "./copilot-clipboard.js";
 import type { FreebuffAttachment, FreebuffContext, FreebuffReview, WorktreeRecord } from "../shared/contracts.js";
 import {
-  DEFAULT_GATE_REVISIONS, DEFAULT_STEP_TIMEOUT_MS, MAX_GATE_FEEDBACK, MAX_GATE_REVISIONS, MAX_STEP_INPUTS, MAX_STEP_PROMPT,
-  MAX_STEP_TIMEOUT_MS, MAX_WORKFLOW_STEPS, MIN_STEP_TIMEOUT_MS, cloneWorkflow, workflowRequiresProject,
+  DEFAULT_GATE_REVISIONS, DEFAULT_STEP_TIMEOUT_MS, MAX_FREEBUFF_REPLY, MAX_GATE_FEEDBACK, MAX_GATE_REVISIONS,
+  MAX_STEP_INPUTS, MAX_STEP_PROMPT, MAX_STEP_TIMEOUT_MS, MAX_WORKFLOW_STEPS, MIN_STEP_TIMEOUT_MS, cloneWorkflow, workflowRequiresProject,
 } from "../shared/workflows.js";
 
 declare global {
@@ -85,7 +85,8 @@ const providerNames = {
   codex: "Codex",
   opencode: "OpenCode",
   claude: "Claude Code",
-} satisfies Record<CliProviderId, string>;
+  freebuff: "Freebuff",
+} satisfies Record<WorkflowProviderId, string>;
 const usageLabels = [
   ["inputTokens", "Input tokens"],
   ["outputTokens", "Output tokens"],
@@ -150,6 +151,7 @@ type WorkflowView =
 
 let workflows: SavedWorkflow[] = [];
 const workflowRuns = new Map<string, WorkflowRun>();
+let selectedChatWorkflowId: string | undefined;
 let workflowView: WorkflowView = { kind: "solo" };
 const plannerProvider = get("workflow-plan-provider", HTMLSelectElement);
 const plannerModel = get("workflow-plan-model", HTMLSelectElement);
@@ -163,6 +165,7 @@ let workflowNote = "";
 let workflowConfirmDelete = false;
 let workflowRunRender: ReturnType<typeof setTimeout> | undefined;
 const gateFeedback = new Map<string, string>();
+const freebuffReplies = new Map<string, string>();
 
 interface ChatSummary {
   id: string;
@@ -199,7 +202,10 @@ function showView(name: string) {
   if (name === "connectors" && !catalogOpen && !profilePreset && supportsWorktreeEditing(selectedConnectorId) && !modelCatalogs[selectedConnectorId]) {
     void refreshModels(selectedConnectorId);
   }
-  if (name === "chats") renderComposerProvider();
+  if (name === "chats") {
+    renderChatWorkflow();
+    renderComposerProvider();
+  }
   if (name === "workflows") renderWorkflows();
 }
 
@@ -265,6 +271,7 @@ function renderControls() {
   const active = activeRun();
   const workflowActive = Boolean(active?.workflowRunId);
   const chatActive = workflowActive || active?.workflowPlanner ? undefined : active;
+  const workflow = selectedChatWorkflow();
   const busy = Boolean(active) || starting || switchingMode || worktreeBusy;
   const stop = get("stop-run", HTMLButtonElement);
   const providerId = chatProviderId();
@@ -300,9 +307,9 @@ function renderControls() {
   get("choose-folder", HTMLButtonElement).disabled = choosing || busy;
   get("new-task", HTMLButtonElement).disabled = choosing || busy;
   for (const button of modeButtons) button.disabled = choosing || busy;
-  stop.hidden = !chatActive;
-  stop.disabled = chatActive?.status === "stopping";
-  stop.textContent = stop.disabled ? "Stopping…" : "Stop run";
+  stop.hidden = workflow ? !isWorkflowInProgress(workflow) : !chatActive;
+  stop.disabled = workflow ? workflowBusy || workflow.status === "stopping" : chatActive?.status === "stopping";
+  stop.textContent = (workflow ?? chatActive)?.status === "stopping" ? "Stopping…" : workflow ? "Stop workflow" : "Stop run";
   runButton.disabled = workflowInvocation ? busy || workflowBusy || choosing : needsProject || busy || choosing || webSigningIn || !promptField.value.trim() ||
     (!freebuff && (modelPending || provider?.status !== "detected" || (modelRequired && !chatModelField.value)));
   const freshFreebuff = document.querySelector<HTMLButtonElement>("[data-freebuff-fresh]");
@@ -322,7 +329,7 @@ function renderControls() {
   if (!message && workflowInvocation) message = "Run a saved workflow with /workflow <name> <prompt>.";
   if (!message && needsProject) message = "Choose a project above to start a Code chat.";
   if (!message && active) {
-    message = workflowActive ? "A workflow step is running. Open Workflows to follow it."
+    message = workflowActive ? "A workflow step is running. Choose its run in the sidebar to follow it."
       : `${active.providerName} is ${statusLabels[active.status].toLowerCase()}.`;
   }
   if (!message && freebuff) message = worktreeBusy ? "Working on the Freebuff handoff…" : "Paste and send the copied prompt in Freebuff.";
@@ -398,6 +405,7 @@ async function selectWorkspaceProject(
     if (folder?.path !== selection.path || startNew) freebuffAttachments.delete("new:code");
     if (!keepChat) viewedFreebuffId = undefined;
     folder = selection;
+    if (!keepChat || startNew) selectedChatWorkflowId = undefined;
     if (!keepChat) selectedChatId = startNew ? undefined : chatId && chatTurns(chatId).length ? chatId : projectChats()[0]?.id;
     newProjectPath = selectedChatId ? undefined : selection.path;
     return true;
@@ -476,7 +484,7 @@ function historyButton({ id, first, latest, count }: ChatSummary, select: () => 
   const name = first.prompt.replace(/\s+/g, " ");
   button.type = "button";
   button.title = first.prompt;
-  if (id === selectedChatId) button.setAttribute("aria-current", "true");
+  if (id === selectedChatId && !selectedChatWorkflowId) button.setAttribute("aria-current", "true");
   button.append(
     element("span", "history-name", name),
     element("span", "history-meta", `${first.providerName} · ${count} ${count === 1 ? "turn" : "turns"} · ${statusLabels[latest.status]}`),
@@ -1137,6 +1145,7 @@ function renderComposerProject(first: Run | undefined) {
 function renderChats() {
   const turns = chatTurns();
   const first = turns[0];
+  const workflow = selectedChatWorkflow();
   const contextTurns = turns.filter((turn) => turn.status !== "running" && turn.status !== "stopping");
   renderComposerProject(first);
   get("composer-context-status").textContent = contextTurns.length
@@ -1154,11 +1163,13 @@ function renderChats() {
   const continueChat = Boolean(first);
   promptField.placeholder = continueChat ? "Ask a follow-up…" : mode === "chat" ? "Ask a question…" : "Ask about your project…";
   const title = get("chat-title");
-  title.textContent = first?.prompt.replace(/\s+/g, " ") ?? (freebuffChatWorktree() ? "Freebuff chat" : mode === "chat" ? "New chat" : "New task");
-  title.title = first ? title.textContent : "";
+  title.textContent = workflow?.workflowName ?? first?.prompt.replace(/\s+/g, " ") ??
+    (freebuffChatWorktree() ? "Freebuff chat" : mode === "chat" ? "New chat" : "New task");
+  title.title = first || workflow ? title.textContent : "";
   renderSidebar();
   renderThread(turns);
   renderFreebuff();
+  renderChatWorkflow();
   renderDetails(turns.at(-1));
   if (providerChanged) renderComposerProvider();
   else renderControls();
@@ -1166,6 +1177,7 @@ function renderChats() {
 
 function selectChat(id: string | undefined) {
   if (starting) return;
+  selectedChatWorkflowId = undefined;
   viewedFreebuffId = undefined;
   selectedChatId = id;
   renderChats();
@@ -1191,6 +1203,7 @@ async function switchMode(next: WorkspaceMode) {
   try {
     await api.setMode(next);
     lastChatByMode[mode] = selectedChatId;
+    selectedChatWorkflowId = undefined;
     viewedFreebuffId = undefined;
     mode = next;
     selectedChatId = Object.hasOwn(lastChatByMode, mode) ? lastChatByMode[mode] : recentChatId();
@@ -1565,6 +1578,7 @@ function refreshModels(providerId: ProviderId) {
   modelRequests[providerId] = request;
   renderConnectors();
   renderControls();
+  if (workflowView.kind === "plan") renderPlannerControls();
   return request;
 }
 
@@ -1714,9 +1728,21 @@ async function refreshConnectors() {
   }
 }
 
-const workflowProviderOptions: ReadonlyArray<readonly [CliProviderId, string]> = [
+const workflowProviderOptions: ReadonlyArray<readonly [WorkflowProviderId, string]> = [
   ["codex", "Codex"], ["opencode", "OpenCode"], ["claude", "Claude Code"],
+  ["freebuff", "Freebuff"],
 ];
+
+function workflowAgentLabel(step: WorkflowAgentStep) {
+  return step.providerId === "freebuff" ? "Freebuff · manual handoff"
+    : `${providerNames[step.providerId]} · ${step.model || "Connector default"}`;
+}
+
+function workflowAgentAccess(step: WorkflowAgentStep) {
+  if (step.providerId === "freebuff") return "Manual";
+  if (step.edit) return "Code · edit in worktree";
+  return step.mode === "code" ? "Code · read-only" : "Chat · no project access";
+}
 
 function workflowCommand(value: string) {
   const command = /^\/workflow(?:\s+([\s\S]*))?$/i.exec(value.trim());
@@ -1754,12 +1780,15 @@ function renderPlannerModels() {
 
 function renderPlannerControls() {
   const active = activeRun();
+  const provider = plannerProvider.value;
+  const loading = isPlannerProvider(provider) && Boolean(modelRequests[provider]);
   const stop = get("workflow-plan-stop", HTMLButtonElement);
   const status = get("workflow-plan-status");
+  get("workflow-plan-loading").hidden = !loading;
   plannerProvider.disabled = plannerBusy || !plannerProvider.options.length;
-  plannerModel.disabled = plannerBusy || !plannerProvider.value;
+  plannerModel.disabled = plannerBusy || loading || !provider;
   get("workflow-plan-send", HTMLButtonElement).disabled = plannerBusy || Boolean(active) ||
-    !plannerProvider.value || !plannerGoal.value.trim();
+    loading || !provider || !plannerGoal.value.trim();
   stop.hidden = !active?.workflowPlanner;
   stop.disabled = active?.status === "stopping";
   const edit = get("workflow-plan-edit", HTMLButtonElement);
@@ -1770,7 +1799,9 @@ function renderPlannerControls() {
   fresh.disabled = plannerBusy;
   status.textContent = plannerBusy ? "Planning your workflow…"
     : active ? "Finish or stop the current run before planning."
-    : !plannerProvider.value ? "Set up a connector to plan a workflow." : "";
+    : !provider ? "Set up a connector to plan a workflow."
+    : loading ? `Loading ${plannerProvider.selectedOptions[0]?.textContent ?? "connector"} models…`
+    : isPlannerProvider(provider) ? modelCatalogs[provider]?.localError ?? "" : "";
 }
 
 function renderPlannerMessages() {
@@ -1787,7 +1818,8 @@ function renderPlannerMessages() {
         const steps = element("ol", "workflow-plan-steps");
         for (const step of turn.result.workflow.steps) {
           const description = step.kind === "agent"
-            ? `${providerNames[step.providerId]} · ${step.model || "Connector default"}` : "Review gate";
+            ? `${workflowAgentLabel(step)}${step.effort ? ` · ${effortLabel(step.effort)}` : ""} · ${workflowAgentAccess(step)}`
+            : `${step.judgeStepId ? "Automatic review" : "Human review"} · up to ${step.maxRevisions} ${step.maxRevisions === 1 ? "revision" : "revisions"}`;
           steps.append(element("li", "", `${step.title} · ${description}`));
         }
         section.append(steps);
@@ -1807,7 +1839,7 @@ function openWorkflowPlanner() {
 async function submitWorkflowPlan() {
   const providerId = plannerProvider.value;
   const prompt = plannerGoal.value.trim();
-  if (plannerBusy || activeRun() || !isPlannerProvider(providerId) || !prompt) return;
+  if (plannerBusy || activeRun() || !isPlannerProvider(providerId) || modelRequests[providerId] || !prompt) return;
   if (prompt.length > plannerGoal.maxLength) {
     get("workflow-plan-status").textContent = `Keep the goal to ${plannerGoal.maxLength.toLocaleString()} characters.`;
     return;
@@ -1933,6 +1965,115 @@ function currentWorkflowRun() {
   return workflowView.kind === "run" ? workflowRuns.get(workflowView.runId) : undefined;
 }
 
+function selectedChatWorkflow() {
+  return selectedChatWorkflowId ? workflowRuns.get(selectedChatWorkflowId) : undefined;
+}
+
+function isWorkflowInProgress(run: WorkflowRun) {
+  return run.status === "running" || run.status === "waiting" || run.status === "stopping";
+}
+
+function workflowStatusIcon(status: WorkflowRunStatus | WorkflowStepStatus) {
+  const glyph = {
+    pending: "○", running: "", waiting: "◷", stopping: "", completed: "✓",
+    failed: "!", cancelled: "×", interrupted: "×", skipped: "–",
+  }[status];
+  const icon = element("span", glyph ? "workflow-status-icon" : "workflow-status-icon loading-icon", glyph);
+  icon.dataset.status = status;
+  icon.setAttribute("aria-hidden", "true");
+  return icon;
+}
+
+function renderChatWorkflow() {
+  const record = selectedChatWorkflow();
+  const outline = get("chat-workflow-outline");
+  const history = get("chat-workflow-history");
+  const feed = get("chat-workflow-feed");
+  const entries = [...workflowRuns.values()].filter((run) => run.goal)
+    .sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+  history.hidden = !entries.length;
+  get("chat-workflow-list").replaceChildren(...entries.map((entry) => {
+    const button = element("button", "history-item workflow-chat-history-item");
+    button.type = "button";
+    button.title = entry.goal ?? entry.workflowName;
+    if (entry.id === record?.id) button.setAttribute("aria-current", "true");
+    const text = element("span", "workflow-chat-history-text");
+    text.append(
+      element("span", "history-name", entry.goal?.replace(/\s+/g, " ") ?? entry.workflowName),
+      element("span", "history-meta", workflowStatusLabels[entry.status]),
+    );
+    button.append(workflowStatusIcon(entry.status), text);
+    button.addEventListener("click", () => openChatWorkflow(entry.id));
+    return button;
+  }));
+
+  outline.hidden = !record;
+  feed.hidden = !record;
+  get("composer-area").hidden = Boolean(record);
+  get("chats").classList.toggle("workflow-chat", Boolean(record));
+  if (!record) {
+    outline.replaceChildren();
+    feed.replaceChildren();
+    return;
+  }
+  for (const id of ["welcome", "feed", "freebuff-handoffs"]) get(id).hidden = true;
+
+  const steps = element("ol", "chat-workflow-steps");
+  for (const [index, step] of record.definition.steps.entries()) {
+    const state = record.steps[index]?.status ?? "pending";
+    const item = element("li");
+    if (isWorkflowInProgress(record) && index === record.currentIndex) item.setAttribute("aria-current", "step");
+    const text = element("div");
+    const access = step.kind === "agent" ? workflowAgentAccess(step) : step.judgeStepId ? "Automatic review" : "Human review";
+    const status = state === "waiting" && isWaitingForFreebuff(record) ? "Waiting for Freebuff" : workflowStepLabels[state];
+    text.append(element("span", "workflow-step-title", step.title),
+      element("span", "workflow-step-meta", `${status} · ${access}`));
+    item.append(workflowStatusIcon(state), text);
+    steps.append(item);
+  }
+  outline.replaceChildren(element("h3", "", "Workflow outline"),
+    element("p", "history-meta", record.folder?.name ?? "Chat-only · no project access"), steps);
+
+  const content = element("section", "conversation-turn");
+  if (record.goal) content.append(feedEntry("You", record.goal, "user"));
+  if (isWorkflowInProgress(record)) content.append(...workflowMessages());
+  const current = record.definition.steps[record.currentIndex];
+  if (record.status === "completed") {
+    const judges = new Set(record.definition.steps.flatMap((step) => step.kind === "gate" && step.judgeStepId ? [step.judgeStepId] : []));
+    const lastAgent = [...record.definition.steps].reverse().find((step) => step.kind === "agent" && !judges.has(step.id));
+    const lastStep = record.steps.find((step) => step.stepId === lastAgent?.id);
+    const run = lastStep?.runId ? runs.get(lastStep.runId) : undefined;
+    const reply = lastStep?.freebuffReply || run?.events.flatMap((event) => event.type === "message" && event.text.trim() ? [event.text] : []).at(-1);
+    if (reply) content.append(agentReply(run?.providerName ?? "Freebuff", reply));
+    else content.append(element("p", "workflow-note", "The workflow finished without a final reply."));
+  } else if (record.status === "waiting" && current?.kind === "gate") {
+    content.append(gateControls(record, current));
+  } else if (current && isWaitingForFreebuff(record)) {
+    content.append(freebuffHandoffControls(record, current.id));
+  } else {
+    const status = element("p", record.error ? "workflow-error" : "workflow-note",
+      record.error ?? workflowStatusLabels[record.status]);
+    status.setAttribute("role", "status");
+    content.append(status);
+  }
+  if (record.worktree && !isWorkflowInProgress(record)) {
+    const run = workflowWorktreeRun(record);
+    const changes = run && runChanges(run, true);
+    const details = element("details", "tool-activity");
+    details.append(element("summary", "", "Review worktree changes"), changes ?? worktreeFallback(record.worktree));
+    content.append(details);
+  }
+  feed.replaceChildren(content);
+}
+
+function openChatWorkflow(runId: string) {
+  selectedChatWorkflowId = runId;
+  workflowError = "";
+  workflowNote = "";
+  renderChats();
+  if (!get("chats").hidden) get("chat-title").focus();
+}
+
 function rememberWorkflowRun(run: WorkflowRun) {
   if ((workflowRuns.get(run.id)?.revision ?? -1) >= run.revision) return false;
   workflowRuns.set(run.id, run);
@@ -1945,6 +2086,7 @@ async function loadWorkflowRuns() {
   } catch {
     // Workflow run history is optional; the timeline simply starts empty.
   }
+  renderChatWorkflow();
 }
 
 async function loadWorkflows() {
@@ -1992,6 +2134,18 @@ function renderWorkflowSidebar() {
     return button;
   });
   list.replaceChildren(...(items.length ? items : [element("p", "workflow-empty", "No saved workflows yet.")]));
+  const handoff = [...workflowRuns.values()].find(isWaitingForFreebuff);
+  if (handoff) {
+    const button = element("button", "button sidebar-action", "Freebuff reply needed");
+    button.type = "button";
+    button.addEventListener("click", () => {
+      workflowView = { kind: "run", runId: handoff.id };
+      workflowError = "";
+      workflowNote = "";
+      renderWorkflows();
+    });
+    list.prepend(button);
+  }
   const solo = get("select-solo");
   if (workflowView.kind === "solo") solo.setAttribute("aria-current", "true");
   else solo.removeAttribute("aria-current");
@@ -2068,8 +2222,8 @@ function workflowDetail(workflow: SavedWorkflow) {
   for (const step of workflow.steps) {
     const item = element("li", "workflow-step-row");
     const meta = step.kind === "agent"
-      ? `${providerNames[step.providerId]} · ${step.model || "Connector default"}${step.edit ? " · edits in worktree" : ""}`
-      : `Review gate · feedback to ${workflow.steps.find((entry) => entry.id === step.feedbackStepId)?.title ?? "an earlier step"}`;
+      ? `${workflowAgentLabel(step)}${step.edit ? " · edits in worktree" : ""}`
+      : `${step.judgeStepId ? "Automatic review" : "Human review"} · feedback to ${workflow.steps.find((entry) => entry.id === step.feedbackStepId)?.title ?? "an earlier step"}`;
     item.append(
       element("span", "workflow-marker"),
       element("span", "workflow-step-title", step.title),
@@ -2116,7 +2270,7 @@ function workflowRunHistory(workflowId: string) {
     const button = element("button", "sidebar-item workflow-history-run");
     button.type = "button";
     button.append(
-      workflowBadge(record.status, workflowStatusLabels[record.status]),
+      workflowBadge(record.status, isWaitingForFreebuff(record) ? "Waiting for Freebuff" : workflowStatusLabels[record.status]),
       element("span", "workflow-step-meta",
         `${new Date(record.startedAt).toLocaleString()} · step ${Math.min(record.currentIndex + 1, record.steps.length)} of ${record.steps.length}`),
     );
@@ -2214,36 +2368,42 @@ function editorStepCard(step: WorkflowStep, index: number, steps: readonly Workf
   card.append(head);
 
   if (step.kind === "agent") {
-    const row = element("div", "workflow-field-row");
-    const model = workflowTextInput(step.model, { field: "model", step: step.id, max: 200, placeholder: "Connector default" });
-    const suggestions = element("datalist");
-    suggestions.id = `workflow-models-${step.id}`;
-    suggestions.dataset.subagentModels = step.providerId;
-    model.setAttribute("list", suggestions.id);
-    row.append(
-      workflowField("Connector", workflowSelect(workflowProviderOptions, step.providerId, "providerId", step.id)),
-      workflowField("Model", model),
-      workflowField("Thinking effort", workflowTextInput(step.effort, {
-        field: "effort", step: step.id, max: 40, placeholder: "Connector default",
-      })),
-    );
-    const row2 = element("div", "workflow-field-row");
-    row2.append(
-      workflowField("Mode", workflowSelect([["code", "Code"], ["chat", "Chat"]] as const, step.mode, "mode", step.id)),
-      workflowField("Time limit (seconds)",
-        workflowNumberInput(step.timeoutMs / 1000, "timeoutSeconds", step.id, MIN_STEP_TIMEOUT_MS / 1000, MAX_STEP_TIMEOUT_MS / 1000)),
-    );
-    card.append(row, row2, suggestions);
+    const connector = workflowField("Connector", workflowSelect(workflowProviderOptions, step.providerId, "providerId", step.id));
+    if (step.providerId === "freebuff") {
+      card.append(connector, element("p", "workflow-note", "Honeycomb copies the prompt when this step starts. Send it in Freebuff, then paste the reply into the workflow."));
+    } else {
+      const row = element("div", "workflow-field-row");
+      const model = workflowTextInput(step.model, { field: "model", step: step.id, max: 200, placeholder: "Connector default" });
+      const suggestions = element("datalist");
+      suggestions.id = `workflow-models-${step.id}`;
+      suggestions.dataset.subagentModels = step.providerId;
+      model.setAttribute("list", suggestions.id);
+      row.append(
+        connector,
+        workflowField("Model", model),
+        workflowField("Thinking effort", workflowTextInput(step.effort, {
+          field: "effort", step: step.id, max: 40, placeholder: "Connector default",
+        })),
+      );
+      const row2 = element("div", "workflow-field-row");
+      row2.append(
+        workflowField("Mode", workflowSelect([["code", "Code"], ["chat", "Chat"]] as const, step.mode, "mode", step.id),
+          "Code uses the selected project. Chat has no project access."),
+        workflowField("Time limit (seconds)",
+          workflowNumberInput(step.timeoutMs / 1000, "timeoutSeconds", step.id, MIN_STEP_TIMEOUT_MS / 1000, MAX_STEP_TIMEOUT_MS / 1000)),
+      );
+      card.append(row, row2, suggestions);
 
-    const edit = element("label", "workflow-check");
-    const box = element("input");
-    box.type = "checkbox";
-    box.checked = step.edit;
-    box.dataset.field = "edit";
-    box.dataset.step = step.id;
-    box.disabled = step.mode !== "code" || !supportsWorktreeEditing(step.providerId);
-    edit.append(box, element("span", "", "Edit in the workflow worktree"));
-    card.append(edit);
+      const edit = element("label", "workflow-check");
+      const box = element("input");
+      box.type = "checkbox";
+      box.checked = step.edit;
+      box.dataset.field = "edit";
+      box.dataset.step = step.id;
+      box.disabled = step.mode !== "code" || !supportsWorktreeEditing(step.providerId);
+      edit.append(box, element("span", "", "Edit in the workflow worktree"));
+      card.append(edit);
+    }
 
     const inputs = element("div", "workflow-inputs");
     inputs.append(element("span", "workflow-field-label", "Inputs"));
@@ -2271,13 +2431,21 @@ function editorStepCard(step: WorkflowStep, index: number, steps: readonly Workf
   } else {
     const row = element("div", "workflow-field-row");
     const earlier = steps.slice(0, index).filter((entry) => entry.kind === "agent");
+    const preceding = steps[index - 1];
+    const reviewers: Array<[string, string]> = [["", "Human review"]];
+    if (preceding?.kind === "agent" && preceding.providerId !== "freebuff" && !preceding.edit) {
+      reviewers.push([preceding.id, preceding.title]);
+    }
+    if (step.judgeStepId && !reviewers.some(([id]) => id === step.judgeStepId)) {
+      reviewers.push([step.judgeStepId, "Reviewer unavailable"]);
+    }
     row.append(
       workflowField("Feedback goes to", workflowSelect(
         earlier.map((entry) => [entry.id, entry.title] as const), step.feedbackStepId, "feedbackStepId", step.id)),
       workflowField("Allowed revisions", workflowNumberInput(step.maxRevisions, "maxRevisions", step.id, 0, MAX_GATE_REVISIONS)),
     );
-    card.append(row, element("p", "workflow-field-hint",
-      "The run pauses here. Approving continues with the next step; rejecting sends your feedback back."));
+    card.append(row, workflowField("Reviewer", workflowSelect(reviewers, step.judgeStepId ?? "", "judgeStepId", step.id),
+      "An automatic reviewer runs immediately before the gate and takes the worker’s result as input."));
   }
   return card;
 }
@@ -2286,7 +2454,7 @@ function workflowEditor(draft: WorkflowDefinition, existing: boolean) {
   const header = element("div", "library-header");
   const title = element("h1", "", existing ? "Edit workflow" : "New workflow");
   title.tabIndex = -1;
-  header.append(title, element("p", "", "Steps run in order. Review gates pause the run until you decide."));
+  header.append(title, element("p", "", "Steps run in order. Human review gates pause the run for your decision."));
 
   const steps = draft.steps.map((step, index) => editorStepCard(step, index, draft.steps));
   const actions = element("div", "workflow-actions");
@@ -2375,11 +2543,15 @@ function onWorkflowInput(event: Event) {
       return;
     case "providerId": {
       if (step.kind !== "agent") return;
-      const provider = value === "opencode" || value === "claude" ? value : "codex";
-      if (provider === step.providerId) return;
+      const provider = workflowProviderOptions.find(([id]) => id === value)?.[0];
+      if (!provider || provider === step.providerId) return;
       step.providerId = provider;
       step.model = "";
       step.effort = "";
+      if (provider === "freebuff") {
+        step.mode = "chat";
+        step.edit = false;
+      }
       renderWorkflowPanel();
       return;
     }
@@ -2416,6 +2588,9 @@ function onWorkflowInput(event: Event) {
     case "feedbackStepId":
       if (step.kind === "gate") step.feedbackStepId = value;
       return;
+    case "judgeStepId":
+      if (step.kind === "gate") step.judgeStepId = value || undefined;
+      return;
     case "maxRevisions": {
       if (step.kind !== "gate") return;
       const revisions = Number.parseInt(value, 10);
@@ -2432,6 +2607,7 @@ async function onWorkflowClick(event: MouseEvent) {
   if (!action) return;
   const stepId = button.dataset.step;
   const draft = workflowDraft();
+  const run = event.currentTarget === get("chat-workflow-feed") ? selectedChatWorkflow() : currentWorkflowRun();
 
   switch (action) {
     case "add-agent": {
@@ -2502,11 +2678,15 @@ async function onWorkflowClick(event: MouseEvent) {
       return;
     }
     case "stop-workflow":
-      void stopWorkflowRun();
+      void stopWorkflowRun(run);
       return;
     case "approve-gate":
     case "reject-gate":
-      void decideGate(action === "approve-gate" ? "approved" : "rejected");
+      void decideGate(action === "approve-gate" ? "approved" : "rejected", run);
+      return;
+    case "copy-freebuff-prompt":
+    case "submit-freebuff-reply":
+      if (stepId) void handleWorkflowFreebuff(stepId, action === "submit-freebuff-reply", run);
       return;
   }
 }
@@ -2576,36 +2756,40 @@ async function startWorkflowRun() {
   }
 }
 
-async function stopWorkflowRun() {
-  const record = currentWorkflowRun();
+function renderWorkflowActions() {
+  renderWorkflows();
+  renderChatWorkflow();
+  renderControls();
+}
+
+async function stopWorkflowRun(record: WorkflowRun | undefined) {
   if (!record || workflowBusy) return;
   workflowBusy = true;
   workflowError = "";
-  renderWorkflowPanel();
+  renderWorkflowActions();
   try {
     await api.stopWorkflow(record.id);
   } catch (error) {
     workflowError = workflowErrorText(error);
   } finally {
     workflowBusy = false;
-    renderWorkflows();
+    renderWorkflowActions();
   }
 }
 
-async function decideGate(decision: "approved" | "rejected") {
-  const record = currentWorkflowRun();
+async function decideGate(decision: "approved" | "rejected", record: WorkflowRun | undefined) {
   if (!record || workflowBusy) return;
   const step = record.definition.steps[record.currentIndex];
   const key = step ? `${record.id}:${step.id}` : "";
   const feedbackValue = key ? gateFeedback.get(key)?.trim() ?? "" : "";
   if (decision === "rejected" && !feedbackValue) {
     workflowError = "Describe what should change before rejecting.";
-    renderWorkflowPanel();
+    renderWorkflowActions();
     return;
   }
   workflowBusy = true;
   workflowError = "";
-  renderWorkflowPanel();
+  renderWorkflowActions();
   try {
     await api.decideWorkflow({ runId: record.id, decision, ...(feedbackValue ? { feedback: feedbackValue } : {}) });
     if (key) gateFeedback.delete(key);
@@ -2613,7 +2797,31 @@ async function decideGate(decision: "approved" | "rejected") {
     workflowError = workflowErrorText(error);
   } finally {
     workflowBusy = false;
-    renderWorkflows();
+    renderWorkflowActions();
+  }
+}
+
+async function handleWorkflowFreebuff(stepId: string, submit: boolean, record: WorkflowRun | undefined) {
+  if (!record || workflowBusy) return;
+  const request = { runId: record.id, stepId };
+  const key = `${record.id}:${stepId}`;
+  workflowBusy = true;
+  workflowError = "";
+  workflowNote = "";
+  renderWorkflowActions();
+  try {
+    if (submit) {
+      await api.submitWorkflowFreebuff({ ...request, reply: freebuffReplies.get(key) ?? "" });
+      freebuffReplies.delete(key);
+    } else {
+      await api.copyWorkflowFreebuff(request);
+      workflowNote = "Prompt copied. Paste it into Freebuff and send it.";
+    }
+  } catch (error) {
+    workflowError = workflowErrorText(error);
+  } finally {
+    workflowBusy = false;
+    renderWorkflowActions();
   }
 }
 
@@ -2682,13 +2890,47 @@ function gateControls(record: WorkflowRun, gate: WorkflowGateStep) {
   return section;
 }
 
+function isWaitingForFreebuff(record: WorkflowRun) {
+  const step = record.definition.steps[record.currentIndex];
+  return record.status === "waiting" && step?.kind === "agent" && step.providerId === "freebuff";
+}
+
+function freebuffHandoffControls(record: WorkflowRun, stepId: string) {
+  const key = `${record.id}:${stepId}`;
+  const section = element("div", "gate-controls");
+  const notice = element("p", "workflow-note", "Paste and send the copied prompt in Freebuff. Paste its completed reply here to continue.");
+  notice.setAttribute("role", "status");
+  const area = element("textarea", "workflow-input");
+  area.rows = 4;
+  area.maxLength = MAX_FREEBUFF_REPLY;
+  area.value = freebuffReplies.get(key) ?? "";
+  const actions = element("div", "workflow-actions");
+  const copy = element("button", "button", "Copy Freebuff prompt");
+  copy.type = "button";
+  copy.dataset.action = "copy-freebuff-prompt";
+  copy.dataset.step = stepId;
+  copy.disabled = workflowBusy;
+  const submit = element("button", "button button-primary", "Submit reply and continue");
+  submit.type = "button";
+  submit.dataset.action = "submit-freebuff-reply";
+  submit.dataset.step = stepId;
+  submit.disabled = workflowBusy || !area.value.trim();
+  area.addEventListener("input", () => {
+    freebuffReplies.set(key, area.value);
+    submit.disabled = workflowBusy || !area.value.trim();
+  });
+  actions.append(copy, submit);
+  section.append(notice, workflowField("Freebuff reply", area), actions);
+  return section;
+}
+
 function workflowRunView(record: WorkflowRun) {
   const header = element("div", "library-header");
   const title = element("h1", "", record.workflowName);
   title.tabIndex = -1;
   const status = element("p", "workflow-run-status");
   status.append(
-    workflowBadge(record.status, workflowStatusLabels[record.status]),
+    workflowBadge(record.status, isWaitingForFreebuff(record) ? "Waiting for Freebuff" : workflowStatusLabels[record.status]),
     element("span", "workflow-step-meta", `${record.folder?.name ?? "Chat"} · started ${new Date(record.startedAt).toLocaleTimeString()}`),
   );
   header.append(title, status);
@@ -2716,19 +2958,21 @@ function workflowRunView(record: WorkflowRun) {
     if (record.status !== "completed" && index === record.currentIndex) item.dataset.current = "true";
     const head = element("div", "workflow-timeline-head");
     head.append(
-      workflowBadge(stepRun?.status ?? "pending", workflowStepLabels[stepRun?.status ?? "pending"]),
+      workflowBadge(stepRun?.status ?? "pending", stepRun?.status === "waiting" && isWaitingForFreebuff(record)
+        ? "Waiting for Freebuff" : workflowStepLabels[stepRun?.status ?? "pending"]),
       element("h2", "", step.title),
       element("span", "workflow-step-index", `${index + 1}`),
     );
     item.append(head);
 
     const meta = step.kind === "agent"
-      ? `${providerNames[step.providerId]} · ${step.model || "Connector default"}${step.effort ? ` · ${effortLabel(step.effort)}` : ""} · ${step.edit ? "Edit in worktree" : step.mode === "chat" ? "Chat" : "Read-only"}`
-      : `Review gate · up to ${step.maxRevisions} ${step.maxRevisions === 1 ? "revision" : "revisions"}`;
+      ? `${workflowAgentLabel(step)}${step.effort ? ` · ${effortLabel(step.effort)}` : ""} · ${step.edit ? "Edit in worktree" : step.mode === "chat" ? "Chat" : "Read-only"}`
+      : `${step.judgeStepId ? "Automatic review" : "Human review"} · up to ${step.maxRevisions} ${step.maxRevisions === 1 ? "revision" : "revisions"}`;
     item.append(element("p", "workflow-step-meta", meta));
     const stepUsage = usageRows(stepRun?.usage);
     if (stepUsage.length) item.append(facts(stepUsage));
     if (stepRun?.detail) item.append(element("p", "workflow-note", stepRun.detail));
+    if (stepRun?.freebuffReply) item.append(agentReply("Freebuff", stepRun.freebuffReply));
 
     const run = stepRun?.runId ? runs.get(stepRun.runId) : undefined;
     if (run) {
@@ -2738,6 +2982,9 @@ function workflowRunView(record: WorkflowRun) {
     }
     if (record.status === "waiting" && stepRun?.status === "waiting" && step.kind === "gate") {
       item.append(gateControls(record, step));
+    }
+    if (isWaitingForFreebuff(record) && stepRun?.status === "waiting") {
+      item.append(freebuffHandoffControls(record, step.id));
     }
     timeline.append(item);
   }
@@ -2889,7 +3136,7 @@ get("workflow-plan-stop").addEventListener("click", () => {
   });
 });
 get("refresh-workflows").addEventListener("click", () => void refreshWorkflows());
-get("workflow-panel").addEventListener("click", (event) => {
+function handleWorkflowPanelClick(event: MouseEvent) {
   const target = event.target instanceof Element ? event.target : null;
   const worktreeButton = target?.closest<HTMLButtonElement>("button[data-worktree]");
   if (worktreeButton) {
@@ -2899,7 +3146,9 @@ get("workflow-panel").addEventListener("click", (event) => {
     return;
   }
   void onWorkflowClick(event);
-});
+}
+get("workflow-panel").addEventListener("click", handleWorkflowPanelClick);
+get("chat-workflow-feed").addEventListener("click", handleWorkflowPanelClick);
 get("workflow-panel").addEventListener("input", onWorkflowInput);
 get("workflow-panel").addEventListener("change", onWorkflowInput);
 api.onWorkflowChanged((change) => {
@@ -2912,6 +3161,10 @@ api.onWorkflowChanged((change) => {
   }
   if (!rememberWorkflowRun(change.run)) return;
   if (workflowView.kind === "run" && workflowView.runId === change.run.id) renderWorkflowPanel();
+  if (change.run.goal) {
+    renderChatWorkflow();
+    renderControls();
+  }
   renderWorkflowSidebar();
 });
 get("select-solo").addEventListener("click", () => {
@@ -2931,6 +3184,11 @@ get("use-connector").addEventListener("click", () => {
   promptField.focus();
 });
 get("stop-run").addEventListener("click", async () => {
+  const workflow = selectedChatWorkflow();
+  if (workflow) {
+    await stopWorkflowRun(workflow);
+    return;
+  }
   const run = activeRun();
   if (!run) return;
   try {
@@ -3079,11 +3337,8 @@ async function runWorkflowFromChat(invocation: string) {
     const projectPath = mode === "code" ? (selectedChatId ? chatTurns()[0]?.folder?.path : newProjectPath) : undefined;
     const runId = await api.runWorkflowCommand({ argument: invocation, projectPath });
     if (promptField.value === draft) promptField.value = "";
-    await loadWorkflowRuns();
-    workflowView = { kind: "run", runId };
-    workflowError = "";
-    workflowNote = "";
-    showView("workflows");
+    if (!workflowRuns.has(runId)) await loadWorkflowRuns();
+    openChatWorkflow(runId);
   } catch (error) {
     showError(error);
   } finally {
@@ -3107,8 +3362,14 @@ api.onRunChanged((run) => {
   if (!remember(run)) return;
   if (workflowView.kind === "plan") renderPlannerControls();
   scheduleWorkflowRunRender(run);
+  if (run.workflowRunId) {
+    const workflow = selectedChatWorkflow();
+    if (workflow?.id === run.workflowRunId && workflow.status === "completed") renderChatWorkflow();
+    if (previous?.status !== run.status) renderControls();
+    return;
+  }
   if (previous?.status === run.status) {
-    if (selectedChatId === conversationId(run)) {
+    if (!selectedChatWorkflowId && selectedChatId === conversationId(run)) {
       renderThread(chatTurns());
       renderDetails(run);
     }
