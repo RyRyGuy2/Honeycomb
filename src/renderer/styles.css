@@ -627,12 +627,11 @@ main { grid-column: 3; }
 .freebuff-options > summary, .freebuff-archive > summary { cursor: pointer; width: fit-content; }
 .freebuff-reply { margin-top: 12px; }
 .freebuff-reply > summary { cursor: pointer; width: fit-content; font-weight: 600; }
-.freebuff-reply > p {
+.freebuff-reply > .freebuff-markdown {
   margin-top: 6px;
   max-height: 280px;
   overflow: auto;
   overflow-wrap: anywhere;
-  white-space: pre-wrap;
   line-height: 1.55;
 }
 .freebuff-archive > .diff-review { margin-top: 8px; }
