@@ -14,6 +14,7 @@ function invoke<Channel extends keyof IpcCalls>(
 const api: HoneycombApi = {
   copyInstallCommand: (command) => invoke("copy-install-command", command),
   getState: () => invoke("state"),
+  factoryReset: () => invoke("factory-reset"),
   inspectProviders: () => invoke("inspect-providers"),
   chatProfiles: () => invoke("chat-profiles"),
   saveChatProfile: (profile) => invoke("save-chat-profile", profile),

@@ -2594,6 +2594,23 @@ for (const button of viewButtons) {
     if (button.dataset.view) showView(button.dataset.view);
   });
 }
+get("factory-reset", HTMLButtonElement).addEventListener("click", async (event) => {
+  const button = event.currentTarget as HTMLButtonElement;
+  const status = get("factory-reset-status");
+  button.disabled = true;
+  status.textContent = "";
+  status.dataset.error = "false";
+  try {
+    if (await api.factoryReset()) {
+      status.textContent = "Restarting Honeycomb…";
+      return;
+    }
+  } catch (error) {
+    status.textContent = actionMessage(error, "Could not reset Honeycomb.");
+    status.dataset.error = "true";
+  }
+  button.disabled = false;
+});
 for (const button of modeButtons) {
   button.addEventListener("click", () => {
     const next = button.dataset.mode;

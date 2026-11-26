@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { claude, claudeModelCatalog, parseClaudeModel } from "../providers/claude.js";
 import { listCodexModels } from "../providers/codex-models.js";
 import { parseCodexModel } from "../providers/codex.js";
-import { WEB_COPILOT_ID, WEB_COPILOT_NAME, createCopilotWeb } from "../providers/copilot-web.js";
+import { WEB_COPILOT_ID, WEB_COPILOT_NAME, WEB_COPILOT_PARTITION, createCopilotWeb } from "../providers/copilot-web.js";
 import { listHttpChatModels, streamHttpChat } from "../providers/http-chat.js";
 import { checkProvider, inspectProviders, providerEnvironment } from "../providers/index.js";
 import { installOpenCodeRelease, managedOpenCodePath, openCodeRelease } from "../providers/opencode-install.js";
@@ -13,6 +13,7 @@ import { listOpenCodeEfforts, listOpenCodeModels, testOpenCode } from "../provid
 import { opencode, parseOpenCodeModel } from "../providers/opencode.js";
 import { COPILOT_ID, COPILOT_NAME, createWindowsCopilot } from "../providers/windows-copilot.js";
 import { createChatProfileStore, parseChatModel } from "../service/chat-profiles.js";
+import { applyFactoryReset, requestFactoryReset } from "../service/factory-reset.js";
 import { runProcess } from "../service/process.js";
 import { FREEBUFF_EXPORT_PATTERN, findFreebuffTerminal, findFreebuffTranscript, openFreebuffTerminal, readFreebuffTranscript, readSavedFreebuffExchange, readSavedFreebuffExchanges } from "../service/freebuff.js";
 import { createRunService } from "../service/runs.js";
@@ -55,6 +56,12 @@ let folder: ProjectFolder | undefined;
 let projects: ProjectFolder[] = [];
 let mode: WorkspaceMode = "code";
 let quitting = false;
+let resetting = false;
+let pendingMutations = 0;
+const readOnlyCalls = new Set<keyof IpcCalls>([
+  "state", "inspect-providers", "chat-profiles", "list-models", "list-opencode-efforts",
+  "review-freebuff", "list-workflows", "list-workflow-runs",
+]);
 const PROVIDER_IDS = ["codex", "opencode", "claude"] as const satisfies readonly CliProviderId[];
 const selectedModels: Record<CliProviderId, string> = { codex: "", opencode: "", claude: "" };
 const modelParsers = { codex: parseCodexModel, opencode: parseOpenCodeModel, claude: parseClaudeModel };
@@ -205,7 +212,7 @@ function handle<Channel extends keyof IpcCalls>(
   channel: Channel,
   callback: (request: unknown, window: BrowserWindow) => ReturnType<IpcCalls[Channel]> | Promise<ReturnType<IpcCalls[Channel]>>,
 ) {
-  ipcMain.handle(`honeycomb:${channel}`, (event, request: unknown) => {
+  ipcMain.handle(`honeycomb:${channel}`, async (event, request: unknown) => {
     const window = mainWindow;
     if (
       !window || window.isDestroyed() || event.sender !== window.webContents ||
@@ -213,12 +220,51 @@ function handle<Channel extends keyof IpcCalls>(
     ) {
       throw new Error("This action is available in the Honeycomb window.");
     }
-    return callback(request, window);
+    if (resetting || quitting) throw new Error("Honeycomb is closing.");
+    const mutates = !readOnlyCalls.has(channel);
+    if (mutates) pendingMutations++;
+    try {
+      return await callback(request, window);
+    } finally {
+      if (mutates) pendingMutations--;
+    }
   });
 }
 
 function registerHandlers() {
   handle("state", workspaceState);
+  handle("factory-reset", async (_request, window) => {
+    function ensureIdle() {
+      if (runs.hasActiveRun() || workflowRuns.hasActiveRun()) {
+        throw new Error("Finish or stop the current chat or workflow before resetting.");
+      }
+      if (pendingMutations > 1) {
+        throw new Error("Finish the current action, then try resetting again.");
+      }
+    }
+    ensureIdle();
+    const { response } = await dialog.showMessageBox(window, {
+      type: "warning",
+      title: "Factory reset Honeycomb",
+      message: "Erase Honeycomb’s local data and restart?",
+      detail: "This permanently clears chat and workflow history, saved projects, connector settings and API keys, app-managed downloads, and the Copilot Web sign-in. Project files and Git worktrees stay on disk.",
+      buttons: ["Cancel", "Reset and restart"],
+      defaultId: 0,
+      cancelId: 0,
+    });
+    if (response !== 1 || window.isDestroyed() || quitting) return false;
+    ensureIdle();
+    resetting = true;
+    try {
+      await requestFactoryReset(app.getPath("userData"));
+    } catch (error) {
+      resetting = false;
+      throw new Error("Could not schedule the factory reset. Your local data is still available.", { cause: error });
+    }
+    app.relaunch();
+    setImmediate(() => app.quit());
+    return true;
+  });
   handle("copy-install-command", (command) => {
     if (typeof command !== "string" || !/^npm install -g [@a-z0-9/-]+$/.test(command) || command.length > 100) {
       throw new Error("Invalid CLI install command.");
@@ -531,6 +577,19 @@ function createWindow() {
 }
 
 app.whenReady().then(async () => {
+  try {
+    await applyFactoryReset(app.getPath("userData"), async () => {
+      for (const browser of [session.defaultSession, session.fromPartition(WEB_COPILOT_PARTITION)]) {
+        await browser.clearData();
+        await browser.clearAuthCache();
+      }
+    });
+  } catch (error) {
+    console.error("Could not finish the factory reset", error);
+    dialog.showErrorBox("Factory reset could not finish", "Close any programs using Honeycomb’s data and reopen Honeycomb to retry.");
+    app.exit(1);
+    return;
+  }
   nativeTheme.themeSource = "dark";
   app.dock?.setIcon(APP_ICON);
   const saved = await workspace.load();
@@ -561,7 +620,7 @@ app.whenReady().then(async () => {
   registerHandlers();
   createWindow();
   app.on("activate", () => {
-    if (!mainWindow) createWindow();
+    if (!mainWindow && !resetting && !quitting) createWindow();
   });
 });
 

@@ -10,7 +10,7 @@ import type { StreamEvent } from "./stream.js";
 export const WEB_COPILOT_ID = "copilot-web";
 export const WEB_COPILOT_NAME = "Copilot Web";
 const HOME = "https://copilot.com/";
-const PARTITION = "persist:honeycomb-copilot-web";
+export const WEB_COPILOT_PARTITION = "persist:honeycomb-copilot-web";
 const COPILOT_HOSTS = new Set(["copilot.com", "www.copilot.com", "copilot.cloud.microsoft", "m365.cloud.microsoft"]);
 const SIGN_IN_HOSTS = new Set(["login.live.com", "account.live.com", "login.microsoftonline.com", "login.microsoft.com", "account.microsoft.com"]);
 const SIGN_IN = "Sign in to Copilot Web from Connectors, then try again.";
@@ -43,11 +43,11 @@ export function createCopilotWeb() {
   let running = false;
 
   function makeWindow(signIn: boolean) {
-    const partition = session.fromPartition(PARTITION);
+    const partition = session.fromPartition(WEB_COPILOT_PARTITION);
     partition.setPermissionRequestHandler((_contents, _permission, respond) => respond(false));
     partition.setPermissionCheckHandler(() => false);
     const preferences = {
-      partition: PARTITION, nodeIntegration: false, contextIsolation: true, sandbox: true,
+      partition: WEB_COPILOT_PARTITION, nodeIntegration: false, contextIsolation: true, sandbox: true,
       webviewTag: false, backgroundThrottling: false,
     };
     const window = new BrowserWindow({

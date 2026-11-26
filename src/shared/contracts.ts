@@ -295,6 +295,7 @@ export interface IpcCalls {
   "review-freebuff": (id: string) => FreebuffReview;
   "copy-freebuff-export": () => void;
   state: () => AppState;
+  "factory-reset": () => boolean;
   "inspect-providers": () => Connector[];
   "chat-profiles": () => ChatProfile[];
   "save-chat-profile": (profile: SaveChatProfile) => ChatProfile;
@@ -335,6 +336,7 @@ export interface HoneycombApi {
   reviewFreebuff: Invoke<"review-freebuff">;
   copyFreebuffExport: Invoke<"copy-freebuff-export">;
   getState: Invoke<"state">;
+  factoryReset: Invoke<"factory-reset">;
   inspectProviders: Invoke<"inspect-providers">;
   chatProfiles: Invoke<"chat-profiles">;
   saveChatProfile: Invoke<"save-chat-profile">;

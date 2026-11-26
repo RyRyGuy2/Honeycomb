@@ -19,6 +19,10 @@ On Windows, `npm.cmd ci` and `npm.cmd start` also work from PowerShell.
 2. Run `codex login` and choose ChatGPT sign-in to use Codex in **Chat**. Honeycomb uses the existing Codex CLI session in both modes. OpenCode uses its configured provider credentials. Claude Code uses its saved CLI sign-in (`claude`, then `/login`) or `ANTHROPIC_API_KEY`. Run `claude update` if Connectors reports that the CLI is too old. [Codex CLI authentication](https://developers.openai.com/codex/noninteractive#authenticate-in-automation) · [OpenCode provider setup](https://opencode.ai/docs/providers) · [Claude Code headless mode](https://code.claude.com/docs/en/headless)
 3. In **Code**, add a project folder, select the connector and model, and enter a task. Use **Chat** for questions without a project. OpenCode and Claude Code use their existing model configuration with tools disabled in Chat mode.
 
+### Settings
+
+Use **Settings → Factory reset** to clear Honeycomb’s local history, connections, and Copilot Web sign-in. The app restarts with its defaults. Project files and Git worktrees stay on disk.
+
 ### Chat connectors
 
 In **Connectors → Add connector**, choose **Ollama**, **FreeLLMAPI**, **LM Studio**, **OpenRouter**, **Google Gemini**, **llama.cpp**, **vLLM**, or **Custom OpenAI-compatible**. Start the provider's server if it's local, enter its API base URL and any required key, then save the connection. **Refresh models** loads the catalog, or you can enter a manual model ID. **Test model** sends a short prompt to verify the selection. Choose **Use in Chat** to start a conversation. Each saved connection can have its own server and model. API keys are encrypted using the operating system's credential storage.

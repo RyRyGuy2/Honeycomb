@@ -536,6 +536,9 @@ main { grid-column: 3; }
 .button-primary { color: var(--rail); background: var(--accent); border-color: var(--accent); }
 .button-primary:hover:enabled { background: var(--accent-hover); border-color: var(--accent-hover); }
 .button-primary:disabled { color: var(--muted); background: var(--accent-wash); border-color: var(--accent-border); opacity: 1; }
+.button-danger { color: #ffadad; border-color: #8b5151; }
+.button-danger:hover:enabled { border-color: #ffadad; background: #442c2c; }
+#factory-reset-status:empty { display: none; }
 
 .details {
   overflow: auto;

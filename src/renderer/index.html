@@ -33,6 +33,12 @@
             <path d="M9 3.5v5m6-5v5m-9 0h12m-11 0v3a5 5 0 0 0 10 0v-3m-5 8v4"/>
           </svg>
         </button>
+        <button type="button" data-view="settings" aria-label="Settings" aria-controls="settings-sidebar settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M10.5 3h3l.6 2.7 2 .9 2.4-1.4 2.1 2.1-1.4 2.4.9 2 2.7.6v3l-2.7.6-.9 2 1.4 2.4-2.1 2.1-2.4-1.4-2 .9-.6 2.7h-3l-.6-2.7-2-.9-2.4 1.4-2.1-2.1 1.4-2.4-.9-2-2.7-.6v-3l2.7-.6.9-2-1.4-2.4 2.1-2.1 2.4 1.4 2-.9z" transform="translate(2 0) scale(.82)"/>
+            <circle cx="11.84" cy="11.32" r="3"/>
+          </svg>
+        </button>
       </nav>
     </div>
 
@@ -81,6 +87,9 @@
           <p id="connector-empty" class="connector-note" hidden>No connectors configured. Use Add connector to set one up.</p>
         </div>
         <button type="button" id="refresh-connectors" class="button sidebar-action">Refresh</button>
+      </aside>
+      <aside id="settings-sidebar" class="sidebar-panel" aria-labelledby="settings-sidebar-title" hidden>
+        <h2 id="settings-sidebar-title" class="sidebar-title">Settings</h2>
       </aside>
     </div>
 
@@ -288,6 +297,17 @@
       <p id="connector-action-status" class="connector-note" role="status"></p>
       <p class="connector-note">Sign in or set a default model in the CLI before running a task.</p>
       </div>
+    </main>
+    <main id="settings" class="library" aria-labelledby="settings-title" hidden>
+      <div class="library-header">
+        <h1 id="settings-title">App data</h1>
+      </div>
+      <section class="connector-card" aria-labelledby="factory-reset-title">
+        <h2 id="factory-reset-title">Factory reset</h2>
+        <p class="connector-note" id="factory-reset-description">Clear Honeycomb’s local history, project list, connectors, and Copilot Web sign-in. Project files and Git worktrees stay on disk.</p>
+        <button type="button" id="factory-reset" class="button button-danger" aria-describedby="factory-reset-description">Factory reset</button>
+        <p id="factory-reset-status" class="chat-status" role="status"></p>
+      </section>
     </main>
   </body>
 </html>
