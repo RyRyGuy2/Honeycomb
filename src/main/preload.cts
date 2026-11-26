@@ -21,6 +21,7 @@ const api: HoneycombApi = {
   testChatProfile: (selection) => invoke("test-chat-profile", selection),
   copilotHandoff: (runId) => invoke("copilot-handoff", runId),
   copilotReply: (request) => invoke("copilot-reply", request),
+  signInCopilotWeb: () => invoke("sign-in-copilot-web"),
   installOpenCode: () => invoke("install-opencode"),
   listModels: (providerId) => invoke("list-models", providerId),
   listOpenCodeEfforts: (model) => invoke("list-opencode-efforts", model),

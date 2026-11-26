@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { claude, claudeModelCatalog, parseClaudeModel } from "../providers/claude.js";
 import { listCodexModels } from "../providers/codex-models.js";
 import { parseCodexModel } from "../providers/codex.js";
+import { WEB_COPILOT_ID, WEB_COPILOT_NAME, createCopilotWeb } from "../providers/copilot-web.js";
 import { listHttpChatModels, streamHttpChat } from "../providers/http-chat.js";
 import { checkProvider, inspectProviders, providerEnvironment } from "../providers/index.js";
 import { installOpenCodeRelease, managedOpenCodePath, openCodeRelease } from "../providers/opencode-install.js";
@@ -27,6 +28,8 @@ const RENDERER_ASSETS = new Map<string, readonly [filename: string, contentType:
   ["/", ["index.html", "text/html"]],
   ["/styles.css", ["styles.css", "text/css"]],
   ["/app.js", ["app.js", "text/javascript"]],
+  ["/copilot-clipboard.js", ["copilot-clipboard.js", "text/javascript"]],
+  ["/shared/connectors.js", ["../shared/connectors.js", "text/javascript"]],
   ["/shared/conversations.js", ["../shared/conversations.js", "text/javascript"]],
   ["/shared/chat-presets.js", ["../shared/chat-presets.js", "text/javascript"]],
   ["/shared/editing.js", ["../shared/editing.js", "text/javascript"]],
@@ -58,6 +61,7 @@ const getOpenCodePath = () => managedOpenCodePath(app.getPath("userData"));
 const modelFile = (providerId: CliProviderId) => join(app.getPath("userData"), `${providerId}-model`);
 const workspace = createWorkspaceStore(() => join(app.getPath("userData"), "workspace.json"));
 const copilot = createWindowsCopilot((text) => clipboard.writeText(text));
+const copilotWeb = createCopilotWeb();
 const chatProfiles = createChatProfileStore(() => join(app.getPath("userData"), "chat-connections.json"), {
   encrypt(key) {
     if (!safeStorage.isEncryptionAvailable() || (process.platform === "linux" && safeStorage.getSelectedStorageBackend() === "basic_text")) {
@@ -87,6 +91,7 @@ const runs = createRunService((run) => {
   if (id === COPILOT_ID && process.platform === "win32") {
     return { id, name: COPILOT_NAME, stream: copilot.stream };
   }
+  if (id === WEB_COPILOT_ID) return { id, name: WEB_COPILOT_NAME, stream: copilotWeb.stream };
   const profile = chatProfiles.find(id);
   if (!profile) return;
   const model = parseChatModel(selected ?? "") || profile.model || profile.manualModel || "";
@@ -256,7 +261,8 @@ function registerHandlers() {
     const [connectors, windowsCopilot] = await Promise.all([inspectProviders(getOpenCodePath()), copilot.inspect(connectorAbort.signal)]);
     return [...connectors.map((connector) => connector.id === "opencode"
       ? { ...connector, downloadAvailable: Boolean(openCodeRelease()) }
-      : connector), windowsCopilot, ...chatProfiles.list().map(({ id, name }) => ({ id, name, status: "detected" as const, chatOnly: true }))];
+      : connector), windowsCopilot, { id: WEB_COPILOT_ID, name: WEB_COPILOT_NAME, status: "detected", chatOnly: true },
+      ...chatProfiles.list().map(({ id, name }) => ({ id, name, status: "detected" as const, chatOnly: true }))];
   });
   handle("chat-profiles", chatProfiles.list);
   handle("save-chat-profile", (request) => trackConnectorJob(chatProfiles.save(request)));
@@ -273,6 +279,7 @@ function registerHandlers() {
     const { runId, text } = asRecord(request) ?? {};
     copilot.reply(runId, text);
   });
+  handle("sign-in-copilot-web", () => trackConnectorJob(copilotWeb.signIn(connectorAbort.signal)));
   handle("install-opencode", installOpenCode);
   handle("list-models", (value) => {
     if (chatProfiles.find(value)) {
@@ -460,7 +467,10 @@ function createWindow() {
   window.webContents.on("will-navigate", (event) => event.preventDefault());
   window.webContents.on("will-frame-navigate", (event) => event.preventDefault());
   window.once("ready-to-show", () => window.show());
-  window.once("closed", () => { mainWindow = undefined; });
+  window.once("closed", () => {
+    mainWindow = undefined;
+    if (process.platform !== "darwin" && BrowserWindow.getAllWindows().length) app.quit();
+  });
   void window.loadURL(APP_URL);
 }
 

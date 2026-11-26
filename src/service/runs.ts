@@ -320,6 +320,7 @@ export function createRunService(
         providerId: connector.id,
         providerName: connector.name,
         ...(connector.id === "windows-copilot" ? { copilotThread: [...turns].reverse().find((turn) => turn.copilotThread)?.copilotThread } : {}),
+        ...(connector.id === "copilot-web" ? { copilotWebThread: [...turns].reverse().find((turn) => turn.copilotWebThread)?.copilotWebThread } : {}),
         mode,
         folder: mode === "code" ? folder : undefined,
         ...(edit ? { edit: true } : {}),

@@ -84,7 +84,7 @@ export function createWindowsCopilot(copy: (text: string) => void) {
       const installed = native || (process.platform === "win32" && Boolean(await registeredApp(signal)));
       return {
         id: COPILOT_ID, name: COPILOT_NAME, chatOnly: true, status: installed ? "detected" : "missing",
-        detail: installed ? "Uses the signed-in Windows app. If desktop controls are unavailable, paste the reply into Honeycomb."
+        detail: installed ? "Opens the signed-in Windows app to send and read replies. If desktop controls are unavailable, paste the reply into Honeycomb."
           : process.platform === "win32" ? "Install the Microsoft Copilot app from Microsoft Store." : "Available on Windows.",
       };
     },

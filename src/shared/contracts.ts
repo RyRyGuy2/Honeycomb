@@ -1,6 +1,6 @@
 export type CliProviderId = "codex" | "opencode" | "claude";
 export type ChatProfileId = `chat:${string}`;
-export type ProviderId = CliProviderId | ChatProfileId | "windows-copilot";
+export type ProviderId = CliProviderId | ChatProfileId | "windows-copilot" | "copilot-web";
 export type WorkspaceMode = "code" | "chat";
 export type ConnectorStatus = "checking" | "detected" | "missing" | "unavailable";
 
@@ -140,6 +140,7 @@ export interface Run {
   providerId: ProviderId;
   providerName: string;
   copilotThread?: string;
+  copilotWebThread?: string;
   copilotHandoff?: "prompt" | "reply";
   folder?: ProjectFolder;
   mode?: WorkspaceMode;
@@ -196,6 +197,7 @@ export interface IpcCalls {
   "test-chat-profile": (selection: { id: ChatProfileId; model: string }) => void;
   "copilot-handoff": (runId: string) => void;
   "copilot-reply": (request: { runId: string; text: string }) => void;
+  "sign-in-copilot-web": () => void;
   "install-opencode": () => void;
   "list-models": (providerId: ProviderId) => ModelCatalog;
   "list-opencode-efforts": (model: string) => string[];
@@ -228,6 +230,7 @@ export interface HoneycombApi {
   testChatProfile: Invoke<"test-chat-profile">;
   copilotHandoff: Invoke<"copilot-handoff">;
   copilotReply: Invoke<"copilot-reply">;
+  signInCopilotWeb: Invoke<"sign-in-copilot-web">;
   installOpenCode: Invoke<"install-opencode">;
   listModels: Invoke<"list-models">;
   listOpenCodeEfforts: Invoke<"list-opencode-efforts">;

@@ -23,7 +23,9 @@ On Windows, `npm.cmd ci` and `npm.cmd start` also work from PowerShell.
 
 In **Connectors → Add connector**, choose **Ollama**, **FreeLLMAPI**, **LM Studio**, **OpenRouter**, **Google Gemini**, **llama.cpp**, **vLLM**, or **Custom OpenAI-compatible**. Start the provider's server if it's local, enter its API base URL and any required key, then save the connection. **Refresh models** loads the catalog, or you can enter a manual model ID. **Test model** sends a short prompt to verify the selection. Choose **Use in Chat** to start a conversation. Each saved connection can have its own server and model. API keys are encrypted using the operating system's credential storage.
 
-On Windows, choose **Microsoft Copilot for Windows** to use the signed-in desktop app. Honeycomb can send text through the app's accessibility controls and bring the completed reply back. Keep the original Copilot conversation open for automatic follow-ups. If the controls are unavailable, Honeycomb guides you through sending the copied prompt and pasting the reply.
+On Windows, choose **Microsoft Copilot for Windows** to use the signed-in desktop app. Honeycomb opens Copilot in the foreground, sends the prompt, and reads the reply through its accessibility controls. If those controls are unavailable, send the copied prompt in Copilot and paste the reply back into Honeycomb. Copied rich-text code blocks render as code, and **Save as code** formats a reply you copied as plain source.
+
+Choose **Copilot Web** if you want chats to run in a hidden browser. Select **Sign in to Copilot** and complete your Microsoft sign-in in the window that opens. Honeycomb closes that window when chat is ready and uses its own browser profile for background chats. If your sign-in expires, return to Connectors to sign in again.
 
 ### Code runs
 

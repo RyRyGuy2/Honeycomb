@@ -108,12 +108,23 @@ internal static class WindowsCopilot
 
     private static AutomationElement WaitForDocument()
     {
+        var activated = IntPtr.Zero;
         for (var attempt = 0; attempt < 30; attempt++)
         {
             try
             {
-                var document = Document();
-                if (document != null) return document;
+                var window = Window();
+                if (window != null)
+                {
+                    var handle = new IntPtr(window.Current.NativeWindowHandle);
+                    if (activated != handle)
+                    {
+                        BringForward(handle);
+                        activated = handle;
+                    }
+                    var document = Document();
+                    if (document != null) return document;
+                }
             }
             catch (ElementNotAvailableException) { }
             Thread.Sleep(300);
@@ -151,6 +162,15 @@ internal static class WindowsCopilot
         return true;
     }
 
+    private static bool BringForward(IntPtr handle)
+    {
+        const int restoreWindow = 9;
+        if (IsIconic(handle)) ShowWindowAsync(handle, restoreWindow);
+        if (GetForegroundWindow() != handle) SetForegroundWindow(handle);
+        for (var attempt = 0; attempt < 6 && GetForegroundWindow() != handle; attempt++) Thread.Sleep(75);
+        return GetForegroundWindow() == handle;
+    }
+
     private static Input Key(ushort virtualKey, ushort scanCode, uint flags)
     {
         return new Input
@@ -173,10 +193,7 @@ internal static class WindowsCopilot
         var window = Window();
         if (window == null) return false;
         var handle = new IntPtr(window.Current.NativeWindowHandle);
-        if (IsIconic(handle)) ShowWindowAsync(handle, 9);
-        if (GetForegroundWindow() != handle) SetForegroundWindow(handle);
-        for (var attempt = 0; attempt < 6 && GetForegroundWindow() != handle; attempt++) Thread.Sleep(75);
-        if (GetForegroundWindow() != handle) return false;
+        if (!BringForward(handle)) return false;
         composer.SetFocus();
         for (var attempt = 0; attempt < 6 && !composer.Current.HasKeyboardFocus; attempt++) Thread.Sleep(75);
         var lines = Normalize(prompt).Split('\n');
@@ -187,6 +204,30 @@ internal static class WindowsCopilot
             if (keys.Length > 0 && !SendKeys(handle, composer, keys)) return false;
         }
         return true;
+    }
+
+    private static string ReplyText(AutomationElement document, AutomationElement article)
+    {
+        const string label = "Copilot said:";
+        var fallback = article.Current.Name.Substring(label.Length).Trim();
+        object pattern;
+        try
+        {
+            if (document.TryGetCurrentPattern(TextPattern.Pattern, out pattern))
+            {
+                var range = ((TextPattern)pattern).RangeFromChild(article);
+                var text = Normalize(range.GetText(1000000)).Replace("\ufffc", "").Trim();
+                if (text.StartsWith(label, StringComparison.OrdinalIgnoreCase)) text = text.Substring(label.Length).Trim();
+                // Some Copilot versions expose only the toolbar through the article's text range.
+                var prefix = Regex.Replace(fallback, @"\s+", " ");
+                prefix = prefix.Substring(0, Math.Min(prefix.Length, 80));
+                if (prefix.Length != 0 && text.Contains("\n") &&
+                    Regex.Replace(text, @"\s+", " ").StartsWith(prefix, StringComparison.Ordinal)) return text;
+            }
+        }
+        catch (ArgumentException) { }
+        catch (InvalidOperationException) { }
+        return fallback;
     }
 
     private static string Normalize(string text)
@@ -274,7 +315,8 @@ internal static class WindowsCopilot
                 return 1;
             }
 
-            if (ThreadId(document) != initialThread || Normalize(input.Current.Value).Trim() != Normalize(prompt)) return 1;
+            if (ThreadId(document) != initialThread || Normalize(input.Current.Value).Trim() != Normalize(prompt))
+                return 1;
             Write("SUBMITTED", initialThread);
             send.Invoke();
             var timer = Stopwatch.StartNew();
@@ -297,7 +339,7 @@ internal static class WindowsCopilot
                     if (replies.Length <= copies.Length) continue;
                     var article = ReplyArticle(replies.Last(), document);
                     if (article == null) continue;
-                    var reply = article.Current.Name.Substring("Copilot said:".Length).Trim();
+                    var reply = ReplyText(document, article);
                     if (reply.Length == 0) continue;
                     Write("REPLY", Convert.ToBase64String(Encoding.UTF8.GetBytes(reply)));
                     return 0;

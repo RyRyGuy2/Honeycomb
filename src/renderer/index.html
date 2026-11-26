@@ -71,28 +71,9 @@
           <span aria-hidden="true">+</span> Add connector
         </button>
         <div class="sidebar-list">
-          <button type="button" class="sidebar-item" data-connector="codex" aria-current="true" aria-controls="connector-detail">
-            <span class="connector-monogram" aria-hidden="true">C</span>
-            <span class="connector-row">
-              <span>Codex</span>
-              <span class="connector-row-status">Checking</span>
-            </span>
-          </button>
-          <button type="button" class="sidebar-item" data-connector="opencode" aria-controls="connector-detail">
-            <span class="connector-monogram opencode" aria-hidden="true">O</span>
-            <span class="connector-row">
-              <span>OpenCode</span>
-              <span class="connector-row-status">Checking</span>
-            </span>
-          </button>
-          <button type="button" class="sidebar-item" data-connector="claude" aria-controls="connector-detail">
-            <span class="connector-monogram claude" aria-hidden="true">C</span>
-            <span class="connector-row">
-              <span>Claude Code</span>
-              <span class="connector-row-status">Checking</span>
-            </span>
-          </button>
+          <div id="cli-connector-list" class="sidebar-list"></div>
           <div id="chat-connector-list" class="sidebar-list"></div>
+          <p id="connector-empty" class="connector-note" hidden>No connectors configured. Use Add connector to set one up.</p>
         </div>
         <button type="button" id="refresh-connectors" class="button sidebar-action">Refresh</button>
       </aside>
@@ -250,6 +231,7 @@
           </div>
           <p id="chat-connection-status" class="connector-note" role="status"></p>
           <div id="copilot-connection-controls" hidden>
+            <button type="button" id="sign-in-copilot-web" class="button" hidden>Sign in to Copilot</button>
             <button type="button" id="use-copilot" class="button button-primary">Use in Chat</button>
           </div>
         </div>

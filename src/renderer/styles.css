@@ -326,7 +326,8 @@ main { grid-column: 3; }
 .project-disclosure[aria-expanded="true"]::before { transform: translateY(-2px) rotate(45deg); }
 
 .sidebar-list { display: grid; gap: 5px; }
-#chat-connector-list:empty { display: none; }
+#cli-connector-list:empty, #chat-connector-list:empty { display: none; }
+#connector-empty { padding: 4px 10px 8px; }
 .sidebar-item { display: flex; align-items: center; gap: 9px; font-weight: 620; }
 
 .workflow-marker {

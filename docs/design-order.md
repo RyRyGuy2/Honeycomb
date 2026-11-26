@@ -41,6 +41,8 @@ Run history lives in memory. The app reports provider-supplied token counts and 
 
 ## 3. Saved workflows and manual handoffs
 
+See [`workflow-builder-design.md`](./workflow-builder-design.md), [`workflow-builder-implementation-plan.md`](./workflow-builder-implementation-plan.md), and [`workflow-builder-implementation-prompt.md`](./workflow-builder-implementation-prompt.md).
+
 - Build on Solo with a small, versioned workflow format in `.honeycomb/workflows/`. Start with a Codex planning step followed by OpenCode implementation, with a human review gate. Let the user select either connector for each eligible step.
 - Pass a short result and the relevant files to the next step. Validate dependencies, connector capabilities, and time limits before starting. Add parallel branches only after a linear workflow works end to end.
 

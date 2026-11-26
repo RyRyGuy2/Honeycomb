@@ -30,6 +30,26 @@ test("Chat does not attach the selected project to a run", async () => {
   assert.equal(run.status, "cancelled");
 });
 
+test("Copilot Web resumes its saved web conversation after a failed turn", async () => {
+  const address = "https://copilot.com/chats/example-123";
+  let resumed;
+  const service = createRunService(() => {}, undefined, undefined, (id) => id === "copilot-web" ? {
+    id, name: "Copilot Web",
+    async stream(run, _messages, signal) {
+      resumed = run.copilotWebThread;
+      if (signal.aborted) return;
+      await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
+    },
+  } : undefined);
+  service.restore([
+    savedTurn("Earlier prompt", { providerId: "copilot-web", mode: "chat", copilotWebThread: address }),
+    savedTurn("Failed follow-up", { id: "failed-turn", conversationId: "first-chat", turnIndex: 1, providerId: "copilot-web", mode: "chat", status: "failed" }),
+  ]);
+  service.start(undefined, { providerId: "copilot-web", conversationId: "first-chat", mode: "chat", prompt: "Retry" });
+  assert.equal(resumed, address);
+  await service.shutdown();
+});
+
 test("deleting a chat persists its removal and keeps other chats and the project", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "honeycomb-delete-test-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
