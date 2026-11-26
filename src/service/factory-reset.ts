@@ -1,10 +1,11 @@
 import { lstat, mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { CLI_PROVIDER_IDS } from "../shared/contracts.js";
 
 const RESET_MARKER = "factory-reset.pending";
 const STATE_FILES = [
   "workspace.json", "workspace.json.tmp", "workflow-runs.json", "workflow-runs.json.tmp",
-  "chat-connections.json", "chat-connections.json.tmp", "codex-model", "opencode-model", "claude-model",
+  "chat-connections.json", "chat-connections.json.tmp", ...CLI_PROVIDER_IDS.map((id) => id + "-model"),
 ];
 
 export async function requestFactoryReset(userData: string) {

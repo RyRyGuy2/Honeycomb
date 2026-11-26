@@ -1,9 +1,10 @@
 import type {
   Run, RunUsage, WorkflowAgentStep, WorkflowDefinition, WorkflowGateStep, WorkflowProviderId, WorkflowStep,
 } from "./contracts.js";
+import { CLI_PROVIDER_IDS } from "./contracts.js";
 import { supportsWorktreeEditing } from "./editing.js";
 
-export const WORKFLOW_PROVIDERS: readonly WorkflowProviderId[] = ["codex", "opencode", "claude", "freebuff"];
+export const WORKFLOW_PROVIDERS: readonly WorkflowProviderId[] = [...CLI_PROVIDER_IDS, "freebuff"];
 export const MAX_WORKFLOW_STEPS = 20;
 export const MAX_STEP_PROMPT = 4_000;
 export const MAX_HANDOFF = 3_500;

@@ -1,6 +1,11 @@
+import { CLI_PROVIDER_IDS } from "./contracts.js";
 import type { CliProviderId } from "./contracts.js";
 
-export function supportsWorktreeEditing(provider: unknown): provider is CliProviderId {
+export function isCliProvider(provider: unknown): provider is CliProviderId {
+  return CLI_PROVIDER_IDS.some((id) => id === provider);
+}
+
+export function supportsWorktreeEditing(provider: unknown): provider is "codex" | "opencode" | "claude" {
   return provider === "codex" || provider === "opencode" || provider === "claude";
 }
 

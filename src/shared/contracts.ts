@@ -1,4 +1,5 @@
-export type CliProviderId = "codex" | "opencode" | "claude";
+export const CLI_PROVIDER_IDS = ["codex", "opencode", "claude", "antigravity", "github-copilot"] as const;
+export type CliProviderId = typeof CLI_PROVIDER_IDS[number];
 export type ChatProfileId = `chat:${string}`;
 export type ProviderId = CliProviderId | ChatProfileId | "windows-copilot" | "copilot-web";
 export type WorkspaceMode = "code" | "chat";

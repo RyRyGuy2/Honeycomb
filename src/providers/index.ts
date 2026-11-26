@@ -3,8 +3,10 @@ import { access, stat } from "node:fs/promises";
 import { delimiter, isAbsolute, join } from "node:path";
 import { runProcess } from "../service/process.js";
 import type { Connector } from "../shared/contracts.js";
+import { antigravity } from "./antigravity.js";
 import { claude } from "./claude.js";
 import { codex } from "./codex.js";
+import { githubCopilot } from "./github-copilot.js";
 import { opencode } from "./opencode.js";
 import type { ProviderAdapter } from "./types.js";
 
@@ -12,6 +14,8 @@ export const providers = new Map<string, ProviderAdapter>([
   [codex.id, codex],
   [opencode.id, opencode],
   [claude.id, claude],
+  [antigravity.id, antigravity],
+  [githubCopilot.id, githubCopilot],
 ]);
 
 interface Executable {
@@ -73,12 +77,13 @@ export async function resolveExecutable(provider: ProviderAdapter, managedOpenCo
     return { file: managedOpenCode, args: [] };
   }
 
-  const directories = pathDirectories();
+  const directories = [...new Set([...pathDirectories(), ...(provider.installDirectories ?? []).filter(isAbsolute)])];
+  const name = provider.executableName ?? provider.id;
   for (const directory of directories) {
-    const file = join(directory, WINDOWS ? `${provider.id}.exe` : provider.id);
+    const file = join(directory, WINDOWS ? `${name}.exe` : name);
     if (await isFile(file, true)) return { file, args: [] };
 
-    if (WINDOWS && await isFile(join(directory, `${provider.id}.cmd`))) {
+    if (WINDOWS && await isFile(join(directory, `${name}.cmd`))) {
       // Use the npm package's entry point without interpreting the command shim.
       // Packages ship either a native executable or a JS launcher that needs node.
       for (const parts of provider.npmLaunchers) {

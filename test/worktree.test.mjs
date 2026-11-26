@@ -225,8 +225,11 @@ test("edit requests require Code mode and a supported connector", async () => {
   );
   assert.throws(
     () => service.start(project, { providerId: "unknown", prompt: "Fix it", edit: true }),
-    /Choose Codex, OpenCode or Claude Code/,
+    /Choose an available Code connector/,
   );
+  for (const providerId of ["antigravity", "github-copilot"]) {
+    assert.throws(() => service.start(project, { providerId, prompt: "Fix it", edit: true }), /to edit in a Git worktree/);
+  }
   for (const providerId of ["codex", "opencode", "claude"]) {
     assert.equal(supportsWorktreeEditing(providerId), true);
   }

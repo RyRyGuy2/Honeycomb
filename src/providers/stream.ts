@@ -1,10 +1,11 @@
 import { asRecord } from "../shared/records.js";
 import { randomUUID } from "node:crypto";
 import type { ProviderId } from "../shared/contracts.js";
+import { readJsonLines, runProcess } from "../service/process.js";
 import { runJsonRpc } from "../service/json-rpc.js";
 import type { JsonRpc } from "../service/json-rpc.js";
 import { isOpenCodeV2, OPENCODE_EDIT_AGENT, opencode } from "./opencode.js";
-import type { ProviderUsageEvent } from "./types.js";
+import type { ProviderAdapter, ProviderUsageEvent } from "./types.js";
 
 export type StreamEvent =
   | { type: "delta" | "message"; id: string; text: string }
@@ -14,6 +15,43 @@ export type StreamEvent =
 
 type Transport = Parameters<typeof runJsonRpc>[0];
 type Publish = (event: StreamEvent) => void;
+
+export async function streamHeadlessCli(
+  provider: ProviderAdapter, transport: Transport, prompt: string, model: string | undefined,
+  mode: "chat" | "review", publish: Publish, effort?: string,
+) {
+  const command = provider.command(prompt, model, undefined, mode, effort);
+  const json = provider.id === "antigravity";
+  let failure: string | undefined;
+  let reply: string | undefined;
+  const stdout = json ? readJsonLines((line) => {
+    const update = provider.decode(line);
+    failure ??= update?.failed;
+    for (const event of update?.events ?? (update?.event ? [update.event] : [])) {
+      if (event.type === "message") {
+        if (update?.completed && typeof event.text === "string") reply = event.text;
+      } else if (event.type === "usage") {
+        publish(event);
+      } else if (typeof event.text === "string") {
+        publish({ type: event.type, text: event.text });
+      }
+    }
+  }) : undefined;
+  const result = await runProcess({
+    ...transport, args: [...transport.args, ...command.args], input: command.input, stdout,
+    env: { ...transport.env, ...provider.probeEnvironment, ...command.env },
+    outputLimit: 512_000,
+  });
+  if (result.stopped === "cancelled") return;
+  if (result.stopped === "timeout") throw new Error(provider.name + " reached the run time limit.");
+  if (failure || result.code !== 0 || result.error) {
+    const detail = failure || result.stderr.trim() || result.error;
+    throw new Error(provider.diagnoseStderr?.(detail ?? "") || detail || provider.name + " could not complete the turn.");
+  }
+  if (!json) reply = result.output;
+  if (!reply?.trim()) throw new Error(provider.name + " returned no reply.");
+  publish({ type: "message", id: provider.id, text: reply });
+}
 
 function codexStream(transport: Transport, prompt: string, model: string | undefined, publish: Publish, effort?: string,
   mode: "review" | "chat" | "edit" = "review") {
@@ -125,8 +163,8 @@ async function newOpenCodeSession(rpc: JsonRpc, cwd: string | undefined) {
 export function parseEffort(value: unknown, provider: ProviderId): string | undefined {
   if (value === undefined || value === "") return;
   const valid = provider === "codex" ? /^(none|minimal|low|medium|high|xhigh|max|ultra)$/
-    : provider === "claude" ? /^(low|medium|high|xhigh|max)$/
-    : /^[a-z\d][a-z\d_-]{0,31}$/i;
+    : provider === "opencode" ? /^[a-z\d][a-z\d_-]{0,31}$/i
+    : /^(low|medium|high|xhigh|max)$/;
   if (typeof value !== "string" || !valid.test(value)) throw new Error("Choose a valid thinking level.");
   return value;
 }

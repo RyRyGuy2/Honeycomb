@@ -25,7 +25,8 @@ import { createWorkflowStore } from "../service/workflows.js";
 import { createWorkspaceStore } from "../service/workspace.js";
 import { createWorktreeManager } from "../service/worktree.js";
 import type { CliProviderId, FreebuffContext, IpcCalls, ProjectFolder, WorkflowChange, WorkflowDefinition, WorkspaceMode } from "../shared/contracts.js";
-import { supportsWorktreeEditing } from "../shared/editing.js";
+import { CLI_PROVIDER_IDS } from "../shared/contracts.js";
+import { isCliProvider, supportsWorktreeEditing } from "../shared/editing.js";
 import { asRecord } from "../shared/records.js";
 import { resolveWorkflowCommand, validateWorkflow, workflowRequiresProject } from "../shared/workflows.js";
 
@@ -40,6 +41,7 @@ const RENDERER_ASSETS = new Map<string, readonly [filename: string, contentType:
   ["/shared/conversations.js", ["../shared/conversations.js", "text/javascript"]],
   ["/shared/chat-presets.js", ["../shared/chat-presets.js", "text/javascript"]],
   ["/shared/editing.js", ["../shared/editing.js", "text/javascript"]],
+  ["/shared/contracts.js", ["../shared/contracts.js", "text/javascript"]],
   ["/shared/workflows.js", ["../shared/workflows.js", "text/javascript"]],
   ["/markdown-it.js", ["markdown-it.js", "text/javascript"]],
   ["/honeycomb-logo.svg", ["honeycomb-logo.svg", "image/svg+xml"]],
@@ -65,9 +67,11 @@ const readOnlyCalls = new Set<keyof IpcCalls>([
   "state", "inspect-providers", "chat-profiles", "list-models", "list-opencode-efforts",
   "review-freebuff", "list-workflows", "list-workflow-runs",
 ]);
-const PROVIDER_IDS = ["codex", "opencode", "claude"] as const satisfies readonly CliProviderId[];
-const selectedModels: Record<CliProviderId, string> = { codex: "", opencode: "", claude: "" };
-const modelParsers = { codex: parseCodexModel, opencode: parseOpenCodeModel, claude: parseClaudeModel };
+const selectedModels: Record<CliProviderId, string> = { codex: "", opencode: "", claude: "", antigravity: "", "github-copilot": "" };
+const modelParsers = {
+  codex: parseCodexModel, opencode: parseOpenCodeModel, claude: parseClaudeModel,
+  antigravity: parseChatModel, "github-copilot": parseChatModel,
+};
 let downloading: Promise<void> | undefined;
 const connectorAbort = new AbortController();
 const connectorJobs = new Set<Promise<unknown>>();
@@ -187,9 +191,8 @@ async function removeProject(path: string) {
 }
 
 function requireProviderId(value: unknown): CliProviderId {
-  const id = PROVIDER_IDS.find((providerId) => providerId === value);
-  if (id) return id;
-  throw new Error("Choose Codex, OpenCode or Claude Code.");
+  if (isCliProvider(value)) return value;
+  throw new Error("Choose a CLI connector.");
 }
 
 async function listClaudeModels(signal: AbortSignal) {
@@ -200,6 +203,9 @@ async function listClaudeModels(signal: AbortSignal) {
 
 function listCliModels(providerId: CliProviderId, signal: AbortSignal) {
   if (providerId === "claude") return listClaudeModels(signal);
+  if (providerId === "antigravity" || providerId === "github-copilot") {
+    return Promise.resolve({ models: [], selected: selectedModels[providerId], localError: "Uses the model configured in the CLI." });
+  }
   return providerId === "codex" ? listCodexModels(selectedModels.codex, signal)
     : listOpenCodeModels(getOpenCodePath(), selectedModels.opencode, signal);
 }
@@ -314,7 +320,7 @@ function registerHandlers() {
     return true;
   });
   handle("copy-install-command", (command) => {
-    if (typeof command !== "string" || !/^npm install -g [@a-z0-9/-]+$/.test(command) || command.length > 100) {
+    if (typeof command !== "string" || !/^npm install -g [@a-z0-9/-]+(?:@latest)?$/.test(command) || command.length > 100) {
       throw new Error("Invalid CLI install command.");
     }
     clipboard.writeText(command);
@@ -521,7 +527,7 @@ function registerHandlers() {
     const payload = asRecord(value);
     const profile = chatProfiles.find(payload?.providerId);
     const providerId = profile?.id ?? requireProviderId(payload?.providerId);
-    const cli = supportsWorktreeEditing(providerId) ? providerId : undefined;
+    const cli = isCliProvider(providerId) ? providerId : undefined;
     let model = cli ? modelParsers[cli](payload?.model ?? "") : parseChatModel(payload?.model ?? "");
     const goal = typeof payload?.prompt === "string" ? payload.prompt.trim() : "";
     if (!goal || goal.length > MAX_PLAN_GOAL || /[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(goal)) {
@@ -534,7 +540,7 @@ function registerHandlers() {
       return `User: ${turn.prompt.slice(0, 350)}\nPlanner: ${turn.reply.slice(0, 250)}`;
     }).join("\n") : "";
     const available = (await inspectProviders(getOpenCodePath())).flatMap((connector) =>
-      connector.status === "detected" && supportsWorktreeEditing(connector.id) ? [connector.id] : []);
+      connector.status === "detected" && isCliProvider(connector.id) ? [connector.id] : []);
     if (cli && !available.includes(cli)) throw new Error("Choose an installed connector to plan this workflow.");
     const catalogs = await Promise.all(available.map(async (id) => {
       const catalog = await trackConnectorJob(listCliModels(id, connectorAbort.signal)).catch(() => undefined);
@@ -697,7 +703,7 @@ app.whenReady().then(async () => {
   await workflowStore.importLegacy(projects.map((project) => project.path)).catch((error) => {
     console.error("Could not finish importing project workflows", error);
   });
-  await Promise.all([chatProfiles.load().catch((error) => console.error("Could not read chat connections", error)), ...PROVIDER_IDS.map(async (providerId) => {
+  await Promise.all([chatProfiles.load().catch((error) => console.error("Could not read chat connections", error)), ...CLI_PROVIDER_IDS.map(async (providerId) => {
     try {
       selectedModels[providerId] = modelParsers[providerId](await readFile(modelFile(providerId), "utf8"));
     } catch {

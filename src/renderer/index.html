@@ -109,7 +109,7 @@
           <div id="welcome" class="welcome">
             <img class="welcome-mark" src="./honeycomb-logo.svg" alt="" width="76" height="76">
             <h2 id="welcome-title">Start a review run</h2>
-            <p id="welcome-description">Choose a project and ask Codex, OpenCode or Claude Code to investigate.</p>
+            <p id="welcome-description">Choose a project and a connector to investigate.</p>
             <div id="prompt-ideas" class="prompt-ideas" aria-label="Example tasks">
               <button type="button" data-prompt="Summarize the repository layout and point me to the main entry points.">
                 Map the repository <span aria-hidden="true">↗</span>
@@ -154,6 +154,8 @@
                   <option value="codex">Codex</option>
                   <option value="opencode">OpenCode</option>
                   <option value="claude">Claude Code</option>
+                  <option value="antigravity">Google Antigravity CLI</option>
+                  <option value="github-copilot">GitHub Copilot CLI</option>
                   <option value="freebuff" id="freebuff-provider" hidden>Freebuff</option>
                 </select>
                 <span id="chat-model-control">
@@ -192,7 +194,7 @@
         <div class="workflow-flow" aria-label="Your task, then one agent, then a run report">
           <div class="workflow-step">Your task</div>
           <div class="workflow-link" aria-hidden="true">→</div>
-          <div class="workflow-step workflow-agent">Codex, OpenCode or Claude Code</div>
+          <div class="workflow-step workflow-agent">Selected connector</div>
           <div class="workflow-link" aria-hidden="true">→</div>
           <div class="workflow-step">Run report</div>
         </div>

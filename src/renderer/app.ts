@@ -5,7 +5,7 @@ import type {
 } from "../shared/contracts.js";
 import { configuredConnectors } from "../shared/connectors.js";
 import { compareTurns, conversationContext, conversationId, runMode } from "../shared/conversations.js";
-import { supportsWorktreeEditing } from "../shared/editing.js";
+import { isCliProvider, supportsWorktreeEditing } from "../shared/editing.js";
 import { chatPresets, isChatPreset } from "../shared/chat-presets.js";
 import { copilotClipboardMarkdown, copilotCodeBlock } from "./copilot-clipboard.js";
 import type { FreebuffAttachment, FreebuffContext, FreebuffReview, WorktreeRecord } from "../shared/contracts.js";
@@ -29,8 +29,9 @@ const installCommands = {
   codex: "npm install -g @openai/codex",
   opencode: "npm install -g @opencode/cli",
   claude: "npm install -g @anthropic-ai/claude-code@latest",
+  "github-copilot": "npm install -g @github/copilot",
   freebuff: "npm install -g freebuff",
-} satisfies Record<CliProviderId | "freebuff", string>;
+} satisfies Record<Exclude<CliProviderId, "antigravity"> | "freebuff", string>;
 let freebuffWorktrees: WorktreeRecord[] = [];
 const freebuffReviews = new Map<string, FreebuffReview>();
 const freebuffErrors = new Map<string, string>();
@@ -80,11 +81,15 @@ const connectorDescriptions = {
   codex: "Uses the Codex CLI’s read-only sandbox.",
   opencode: "Uses OpenCode’s scoped agent permissions to read, search and edit in a worktree.",
   claude: "Uses Claude Code with read and search tools only, no MCP servers, and no project settings.",
+  antigravity: "Uses the agy CLI for Chat and project review in plan mode. Run agy in a terminal to sign in.",
+  "github-copilot": "Uses the copilot CLI for Chat and read-only project review. Run copilot login in a terminal to sign in.",
 } satisfies Record<CliProviderId, string>;
 const providerNames = {
   codex: "Codex",
   opencode: "OpenCode",
   claude: "Claude Code",
+  antigravity: "Google Antigravity CLI",
+  "github-copilot": "GitHub Copilot CLI",
   freebuff: "Freebuff",
 } satisfies Record<WorkflowProviderId, string>;
 const usageLabels = [
@@ -138,6 +143,8 @@ let connectors: Connector[] = [
   { id: "codex", name: "Codex", status: "checking" },
   { id: "opencode", name: "OpenCode", status: "checking" },
   { id: "claude", name: "Claude Code", status: "checking" },
+  { id: "antigravity", name: providerNames.antigravity, status: "checking" },
+  { id: "github-copilot", name: providerNames["github-copilot"], status: "checking" },
 ];
 const runs = new Map<string, Run>();
 const openActivity = new Set<string>();
@@ -199,7 +206,7 @@ function showView(name: string) {
     if (selected) button.setAttribute("aria-current", "page");
     else button.removeAttribute("aria-current");
   }
-  if (name === "connectors" && !catalogOpen && !profilePreset && supportsWorktreeEditing(selectedConnectorId) && !modelCatalogs[selectedConnectorId]) {
+  if (name === "connectors" && !catalogOpen && !profilePreset && isCliProvider(selectedConnectorId) && !modelCatalogs[selectedConnectorId]) {
     void refreshModels(selectedConnectorId);
   }
   if (name === "chats") {
@@ -343,7 +350,7 @@ function renderControls() {
 
 function chatProviderId(): ProviderId {
   const value = providerField.value;
-  return isCopilotProvider(value) || value.startsWith("chat:") || supportsWorktreeEditing(value) ? value as ProviderId : "codex";
+  return isCopilotProvider(value) || value.startsWith("chat:") || isCliProvider(value) ? value as ProviderId : "codex";
 }
 
 function isCopilotProvider(value: string): value is "windows-copilot" | "copilot-web" {
@@ -355,7 +362,7 @@ function renderChatProviders(first = chatTurns()[0]) {
   providerField.querySelectorAll("[data-chat-connector]").forEach((option) => option.remove());
   if (mode === "chat") {
     const available = connectors.filter((connector) => connector.chatOnly);
-    if (first && !supportsWorktreeEditing(first.providerId) && !available.some((connector) => connector.id === first.providerId)) {
+    if (first && !isCliProvider(first.providerId) && !available.some((connector) => connector.id === first.providerId)) {
       available.push({ id: first.providerId, name: first.providerName, status: "missing" });
     }
     for (const connector of available) {
@@ -1190,7 +1197,7 @@ function renderWorkspaceMode() {
   get("choose-folder").hidden = chat;
   get("history-title").textContent = chat ? "Recent chats" : "Projects";
   get("welcome-title").textContent = chat ? "Ask a question" : "Start a review run";
-  get("welcome-description").textContent = chat ? "Choose a model and start a conversation." : "Choose a project and ask Codex, OpenCode or Claude Code to investigate.";
+  get("welcome-description").textContent = chat ? "Choose a model and start a conversation." : "Choose a project and a connector to investigate.";
   get("prompt-ideas").hidden = chat;
   renderChats();
   renderComposerProvider();
@@ -1256,7 +1263,7 @@ function renderConnectors() {
   if (chatSettings) return renderChatConnection();
 
   const connector = connectors.find((entry) => entry.id === selectedConnectorId);
-  if (!connector || !supportsWorktreeEditing(connector.id)) return;
+  if (!connector || !isCliProvider(connector.id)) return;
   const mark = get("connector-mark");
   mark.textContent = connector.name.charAt(0);
   mark.classList.toggle("opencode", connector.id === "opencode");
@@ -1289,6 +1296,15 @@ function renderConnectors() {
 
 function installCommand(id: CliProviderId | "freebuff", name: string) {
   const row = element("div", "connector-install-command");
+  if (id === "antigravity") {
+    const guide = element("button", "button button-small", "Open installation guide");
+    guide.type = "button";
+    guide.addEventListener("click", () => {
+      void api.openReplyLink("https://antigravity.google/docs/cli/getting-started/").catch(showError);
+    });
+    row.append(guide);
+    return row;
+  }
   const command = installCommands[id];
   const copy = element("button", "button button-small", "Copy");
   copy.type = "button";
@@ -1313,7 +1329,7 @@ function renderCatalog() {
   const query = get("connector-search", HTMLInputElement).value.trim().toLowerCase();
   const results = connectors.flatMap((connector) => {
     const { id, name } = connector;
-    return supportsWorktreeEditing(id) && `${name} ${connectorDescriptions[id]}`.toLowerCase().includes(query)
+    return isCliProvider(id) && `${name} ${connectorDescriptions[id]}`.toLowerCase().includes(query)
       ? [{ ...connector, id }] : [];
   });
   const cards = results.map((connector) => {
@@ -1466,7 +1482,7 @@ function renderModelPicker(select: HTMLSelectElement, providerId: ProviderId) {
   const codexChat = select === chatModelField && mode === "chat" && providerId === "codex";
   const catalog = modelCatalogs[providerId];
   const loading = Boolean(modelRequests[providerId]);
-  const providerName = supportsWorktreeEditing(providerId) ? providerNames[providerId]
+  const providerName = isCliProvider(providerId) ? providerNames[providerId]
     : connectors.find((connector) => connector.id === providerId)?.name ?? "Connector";
   const direct = providerId.startsWith("chat:");
   const fallback = element("option", "", loading && !catalog ? "Loading models…" : direct ? "Choose a model" : `${providerName} default`);
@@ -1548,7 +1564,7 @@ function renderThinking(providerId: ProviderId) {
 function renderModels() {
   renderModelPicker(chatModelField, chatProviderId());
   renderThinking(chatProviderId());
-  if (!supportsWorktreeEditing(selectedConnectorId) || profilePreset) return;
+  if (!isCliProvider(selectedConnectorId) || profilePreset) return;
   renderModelPicker(connectorModelField, selectedConnectorId);
   const catalog = modelCatalogs[selectedConnectorId];
   const loading = Boolean(modelRequests[selectedConnectorId]);
@@ -1730,7 +1746,7 @@ async function refreshConnectors() {
 
 const workflowProviderOptions: ReadonlyArray<readonly [WorkflowProviderId, string]> = [
   ["codex", "Codex"], ["opencode", "OpenCode"], ["claude", "Claude Code"],
-  ["freebuff", "Freebuff"],
+  ["antigravity", providerNames.antigravity], ["github-copilot", providerNames["github-copilot"]], ["freebuff", "Freebuff"],
 ];
 
 function workflowAgentLabel(step: WorkflowAgentStep) {
@@ -1750,7 +1766,7 @@ function workflowCommand(value: string) {
 }
 
 function isPlannerProvider(value: string): value is WorkflowPlanRequest["providerId"] {
-  return supportsWorktreeEditing(value) || value.startsWith("chat:");
+  return isCliProvider(value) || value.startsWith("chat:");
 }
 
 function renderPlannerModels() {
@@ -1870,7 +1886,7 @@ async function submitWorkflowPlan() {
 function renderSubagentModels() {
   for (const list of document.querySelectorAll<HTMLDataListElement>("[data-subagent-models]")) {
     const provider = list.dataset.subagentModels;
-    if (!supportsWorktreeEditing(provider)) continue;
+    if (!isCliProvider(provider)) continue;
     if (!modelCatalogs[provider] && connectors.some((entry) => entry.id === provider && entry.status === "detected")) {
       void refreshModels(provider);
     }

@@ -22,6 +22,8 @@ interface ProviderUpdate {
 export interface ProviderAdapter {
   id: CliProviderId;
   name: string;
+  executableName?: string;
+  installDirectories?: readonly string[];
   npmLaunchers: ReadonlyArray<readonly string[]>;
   override: string;
   authEnvironment: readonly string[];
@@ -33,7 +35,7 @@ export interface ProviderAdapter {
   helpIssue?: string;
   parseVersion(output: string): string | undefined;
   versionIssue?(version: string): string | undefined;
-  command(prompt: string, model?: string, version?: string, mode?: "review" | "edit"): ProviderCommand;
+  command(prompt: string, model?: string, version?: string, mode?: "review" | "edit" | "chat", effort?: string): ProviderCommand;
   decode(event: Record<string, unknown>): ProviderUpdate | undefined;
   diagnoseStderr?(stderr: string): string | undefined;
 }

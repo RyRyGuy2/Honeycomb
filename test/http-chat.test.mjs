@@ -96,7 +96,7 @@ test("direct connectors only run in Chat and send completed follow-ups as role m
     },
   } : undefined);
   const request = { providerId: "chat:fixture", prompt: "Earlier question" };
-  assert.throws(() => service.start({ name: "Project", path: process.cwd() }, request), /Choose Codex/);
+  assert.throws(() => service.start({ name: "Project", path: process.cwd() }, request), /Choose an available Code connector/);
   const first = new Promise((resolve) => { completion = resolve; });
   const id = service.start(undefined, { ...request, mode: "chat" });
   await first;

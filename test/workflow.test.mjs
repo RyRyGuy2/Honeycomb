@@ -148,6 +148,9 @@ test("validation refuses fields that would turn a definition into a program", ()
 
 test("validation enforces connectors, ordering and limits", () => {
   assert.throws(() => validateWorkflow(workflow({ steps: [agent({ providerId: "gemini" })] })), /supported workflow connector/);
+  for (const providerId of ["antigravity", "github-copilot"]) {
+    assert.equal(validateWorkflow(workflow({ steps: [agent({ providerId })] })).steps[0].providerId, providerId);
+  }
   assert.throws(() => validateWorkflow(workflow({ steps: [agent({ providerId: "freebuff" })] })), /use Chat for Freebuff/);
   assert.equal(validateWorkflow(workflow({ steps: [agent({ edit: true, providerId: "opencode" })] })).steps[0].edit, true);
   assert.throws(() => validateWorkflow(workflow({ steps: [agent({ mode: "chat", edit: true })] })), /only edit in Code/);

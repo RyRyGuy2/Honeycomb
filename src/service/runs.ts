@@ -6,7 +6,7 @@ import { streamClaude } from "../providers/claude.js";
 import { parseCodexModel } from "../providers/codex.js";
 import type { ChatMessage } from "../providers/http-chat.js";
 import { checkProvider, providerEnvironment, providers } from "../providers/index.js";
-import { parseEffort, streamCodexChat, streamCodexEdit, streamOpenCodeChat, streamOpenCodeEdit, streamProvider } from "../providers/stream.js";
+import { parseEffort, streamCodexChat, streamCodexEdit, streamHeadlessCli, streamOpenCodeChat, streamOpenCodeEdit, streamProvider } from "../providers/stream.js";
 import type { StreamEvent } from "../providers/stream.js";
 import type { ProviderAdapter, ProviderUsageEvent } from "../providers/types.js";
 import type {
@@ -231,6 +231,8 @@ export function createRunService(
         await streamClaude(transport, prompt, {
           model, effort, chat: run.mode === "chat", edit: run.edit === true,
         }, receive);
+      } else if (provider.id === "antigravity" || provider.id === "github-copilot") {
+        await streamHeadlessCli(provider, transport, prompt, model, run.mode === "chat" ? "chat" : "review", receive, effort);
       } else if (run.mode === "chat") {
         await streamOpenCodeChat(transport, prompt, model, connector.version, receive, effort);
       } else {
@@ -317,7 +319,7 @@ export function createRunService(
       const provider = typeof providerId === "string" ? providers.get(providerId) : undefined;
       const direct = !provider && mode === "chat" ? chatOnly?.(providerId, payload?.model) : undefined;
       const connector = provider ?? direct;
-      if (!connector) throw new Error(mode === "code" ? "Choose Codex, OpenCode or Claude Code." : "Choose an available Chat connector.");
+      if (!connector) throw new Error(mode === "code" ? "Choose an available Code connector." : "Choose an available Chat connector.");
       const effort = provider ? parseEffort(payload?.effort, provider.id) : undefined;
       const chatModel = mode === "chat" && provider?.id === "codex" ? parseCodexModel(payload?.model ?? "") || undefined : undefined;
       const prompt = typeof payload?.prompt === "string" ? payload.prompt.trim() : "";
