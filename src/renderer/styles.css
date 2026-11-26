@@ -539,6 +539,8 @@ main { grid-column: 3; }
 .button-danger { color: #ffadad; border-color: #8b5151; }
 .button-danger:hover:enabled { border-color: #ffadad; background: #442c2c; }
 #factory-reset-status:empty { display: none; }
+#workflow-plan-messages:not(:empty) { display: grid; gap: 18px; margin-bottom: 20px; }
+.workflow-plan-steps { padding-left: 1.4em; color: var(--muted); }
 
 .details {
   overflow: auto;

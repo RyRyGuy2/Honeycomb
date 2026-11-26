@@ -21,7 +21,13 @@ On Windows, `npm.cmd ci` and `npm.cmd start` also work from PowerShell.
 
 ### Settings
 
-Use **Settings → Factory reset** to clear Honeycomb’s local history, connections, and Copilot Web sign-in. The app restarts with its defaults. Project files and Git worktrees stay on disk.
+Use **Settings → Factory reset** to clear Honeycomb’s local history, saved workflows, connections, and Copilot Web sign-in. The app restarts with its defaults. Project files and Git worktrees stay on disk.
+
+### Plan a workflow
+
+Choose **Plan a workflow** in Workflows to draft and refine a plan. Saved workflows live in Honeycomb’s app data and can be saved without a project. Honeycomb imports existing workflow files from projects already in its saved project list.
+
+In Chats, type `/workflow "Review changes" Focus on the import flow` to run a saved workflow by name. You can also use its ID. Honeycomb passes the prompt to its subagents and opens the run timeline. Workflows with Code steps use the project selected in Code. Chat-only workflows can run without a project. Honeycomb shows token counts and costs when a provider reports them.
 
 ### Chat connectors
 

@@ -1,7 +1,7 @@
 import type {
   ChatPresetId, ChatProfile, CliProviderId, Connector, ConnectorStatus, ConversationContextSummary, DiffFile, HoneycombApi, ModelCatalog, ModelSelection, ProjectFolder, ProviderId, Run, RunStatus,
   RunUsage, RunWorktree, SavedWorkflow, SidebarMenuRequest, WorkflowAgentStep, WorkflowDefinition, WorkflowGateStep, WorkflowRun, WorkflowRunStatus,
-  WorkflowStep, WorkflowStepStatus, WorkspaceMode,
+  WorkflowPlanReply, WorkflowPlanRequest, WorkflowStep, WorkflowStepStatus, WorkspaceMode,
 } from "../shared/contracts.js";
 import { configuredConnectors } from "../shared/connectors.js";
 import { compareTurns, conversationContext, conversationId, runMode } from "../shared/conversations.js";
@@ -11,7 +11,7 @@ import { copilotClipboardMarkdown, copilotCodeBlock } from "./copilot-clipboard.
 import type { FreebuffAttachment, FreebuffContext, FreebuffReview, WorktreeRecord } from "../shared/contracts.js";
 import {
   DEFAULT_GATE_REVISIONS, DEFAULT_STEP_TIMEOUT_MS, MAX_GATE_FEEDBACK, MAX_GATE_REVISIONS, MAX_STEP_INPUTS, MAX_STEP_PROMPT,
-  MAX_STEP_TIMEOUT_MS, MAX_WORKFLOW_STEPS, MIN_STEP_TIMEOUT_MS, cloneWorkflow,
+  MAX_STEP_TIMEOUT_MS, MAX_WORKFLOW_STEPS, MIN_STEP_TIMEOUT_MS, cloneWorkflow, workflowRequiresProject,
 } from "../shared/workflows.js";
 
 declare global {
@@ -143,6 +143,7 @@ const openActivity = new Set<string>();
 
 type WorkflowView =
   | { kind: "solo" }
+  | { kind: "plan" }
   | { kind: "detail"; id: string }
   | { kind: "edit"; draft: WorkflowDefinition; existing: boolean }
   | { kind: "run"; runId: string };
@@ -150,6 +151,12 @@ type WorkflowView =
 let workflows: SavedWorkflow[] = [];
 const workflowRuns = new Map<string, WorkflowRun>();
 let workflowView: WorkflowView = { kind: "solo" };
+const plannerProvider = get("workflow-plan-provider", HTMLSelectElement);
+const plannerModel = get("workflow-plan-model", HTMLSelectElement);
+const plannerGoal = get("workflow-plan-goal", HTMLTextAreaElement);
+const plannerTurns: Array<{ prompt: string; result?: WorkflowPlanReply; error?: string }> = [];
+let plannerDraft: WorkflowDefinition | undefined;
+let plannerBusy = false;
 let workflowBusy = false;
 let workflowError = "";
 let workflowNote = "";
@@ -200,7 +207,7 @@ function chatHistory() {
   const chats = new Map<string, ChatSummary>();
   for (const run of runs.values()) {
     // Workflow steps keep their own timeline in Workflows instead of appearing as chats.
-    if (run.workflowRunId) continue;
+    if (run.workflowRunId || run.workflowPlanner) continue;
     const id = conversationId(run);
     const chat = chats.get(id);
     if (chat) {
@@ -257,7 +264,7 @@ function showError(error: unknown) {
 function renderControls() {
   const active = activeRun();
   const workflowActive = Boolean(active?.workflowRunId);
-  const chatActive = workflowActive ? undefined : active;
+  const chatActive = workflowActive || active?.workflowPlanner ? undefined : active;
   const busy = Boolean(active) || starting || switchingMode || worktreeBusy;
   const stop = get("stop-run", HTMLButtonElement);
   const providerId = chatProviderId();
@@ -272,6 +279,7 @@ function renderControls() {
   const copilot = isCopilotProvider(providerId);
   const webSigningIn = providerId === "copilot-web" && copilotWebSignInPending;
   const modelRequired = providerId.startsWith("chat:");
+  const workflowInvocation = workflowCommand(promptField.value) !== undefined;
   const resumeFreebuff = freebuff && Boolean(latestActiveFreebuff());
   const attachment = pendingFreebuff();
   const contextStatus = get("composer-freebuff-status");
@@ -295,7 +303,7 @@ function renderControls() {
   stop.hidden = !chatActive;
   stop.disabled = chatActive?.status === "stopping";
   stop.textContent = stop.disabled ? "Stopping…" : "Stop run";
-  runButton.disabled = needsProject || busy || choosing || webSigningIn || !promptField.value.trim() ||
+  runButton.disabled = workflowInvocation ? busy || workflowBusy || choosing : needsProject || busy || choosing || webSigningIn || !promptField.value.trim() ||
     (!freebuff && (modelPending || provider?.status !== "detected" || (modelRequired && !chatModelField.value)));
   const freshFreebuff = document.querySelector<HTMLButtonElement>("[data-freebuff-fresh]");
   if (freshFreebuff) freshFreebuff.disabled = !freebuff || runButton.disabled;
@@ -306,11 +314,12 @@ function renderControls() {
   accessPicker.title = canEdit ? "Choose whether to review or edit in a separate Git worktree." : "This connector supports read-only review in Honeycomb.";
   editAccessOption.disabled = !canEdit;
   accessPicker.value = editing ? "edit" : "review";
-  get("send-label").textContent = freebuff ? (resumeFreebuff ? "Continue in Freebuff" : "Open in Freebuff")
+  get("send-label").textContent = workflowInvocation ? "Run workflow" : freebuff ? (resumeFreebuff ? "Continue in Freebuff" : "Open in Freebuff")
     : editing ? "Send edit" : selectedChatId || mode === "chat" ? "Send" : "Run task";
   chatStatus.dataset.error = String(Boolean(actionError));
 
   let message = actionError;
+  if (!message && workflowInvocation) message = "Run a saved workflow with /workflow <name> <prompt>.";
   if (!message && needsProject) message = "Choose a project above to start a Code chat.";
   if (!message && active) {
     message = workflowActive ? "A workflow step is running. Open Workflows to follow it."
@@ -399,7 +408,6 @@ async function selectWorkspaceProject(
     choosing = false;
     renderChats();
     refreshLatestFreebuff();
-    void loadWorkflows();
   }
 }
 
@@ -1076,11 +1084,7 @@ function renderDetails(run: Run | undefined) {
 
   const usage = element("section", "run-usage");
   usage.append(element("h3", "", "Usage"));
-  const totals: Array<[string, string]> = [];
-  for (const [key, label] of usageLabels) {
-    const value = run.usage[key];
-    if (value !== undefined) totals.push([label, (key === "costUsd" ? usd : number).format(value)]);
-  }
+  const totals = usageRows(run.usage);
   const active = run.status === "running" || run.status === "stopping";
   const emptyUsage = active ? "Waiting for usage data." : "The provider reported no usage.";
   usage.append(totals.length ? facts(totals) : element("p", "empty-details", emptyUsage));
@@ -1094,6 +1098,13 @@ function renderDetails(run: Run | undefined) {
     );
   }
   panel.replaceChildren(heading, ...(details.length ? [facts(details)] : []), usage);
+}
+
+function usageRows(usage?: RunUsage): Array<[string, string]> {
+  return usageLabels.flatMap(([key, label]) => {
+    const value = usage?.[key];
+    return typeof value === "number" && Number.isFinite(value) ? [[label, (key === "costUsd" ? usd : number).format(value)]] : [];
+  });
 }
 
 function renderComposerProject(first: Run | undefined) {
@@ -1548,6 +1559,8 @@ function refreshModels(providerId: ProviderId) {
     renderConnectors();
     renderModels();
     renderControls();
+    if (workflowView.kind === "plan") renderPlannerModels();
+    if (workflowView.kind === "edit") renderSubagentModels();
   });
   modelRequests[providerId] = request;
   renderConnectors();
@@ -1696,12 +1709,146 @@ async function refreshConnectors() {
     renderConnectors();
     renderChatProviders();
     renderComposerProvider();
+    if (workflowView.kind === "plan") renderPlannerModels();
+    if (workflowView.kind === "edit") renderSubagentModels();
   }
 }
 
 const workflowProviderOptions: ReadonlyArray<readonly [CliProviderId, string]> = [
   ["codex", "Codex"], ["opencode", "OpenCode"], ["claude", "Claude Code"],
 ];
+
+function workflowCommand(value: string) {
+  const command = /^\/workflow(?:\s+([\s\S]*))?$/i.exec(value.trim());
+  return command ? (command[1] ?? "").trim() : undefined;
+}
+
+function isPlannerProvider(value: string): value is WorkflowPlanRequest["providerId"] {
+  return supportsWorktreeEditing(value) || value.startsWith("chat:");
+}
+
+function renderPlannerModels() {
+  const selectedProvider = plannerProvider.value;
+  const selectedModel = plannerModel.value;
+  const available = connectors.filter((connector) => connector.status === "detected" && isPlannerProvider(connector.id));
+  plannerProvider.replaceChildren(...available.map((connector) => {
+    const option = element("option", "", connector.name);
+    option.value = connector.id;
+    return option;
+  }));
+  if (available.some((connector) => connector.id === selectedProvider)) plannerProvider.value = selectedProvider;
+  const provider = plannerProvider.value;
+  plannerModel.replaceChildren(element("option", "", "Connector default"));
+  plannerModel.options[0]!.value = "";
+  if (isPlannerProvider(provider)) {
+    if (!modelCatalogs[provider]) void refreshModels(provider);
+    for (const model of modelCatalogs[provider]?.models.filter((entry) => entry.available) ?? []) {
+      const option = element("option", "", model.name === model.id ? model.id : `${model.name} (${model.id})`);
+      option.value = model.id;
+      plannerModel.append(option);
+    }
+    if ([...plannerModel.options].some((option) => option.value === selectedModel)) plannerModel.value = selectedModel;
+  }
+  renderPlannerControls();
+}
+
+function renderPlannerControls() {
+  const active = activeRun();
+  const stop = get("workflow-plan-stop", HTMLButtonElement);
+  const status = get("workflow-plan-status");
+  plannerProvider.disabled = plannerBusy || !plannerProvider.options.length;
+  plannerModel.disabled = plannerBusy || !plannerProvider.value;
+  get("workflow-plan-send", HTMLButtonElement).disabled = plannerBusy || Boolean(active) ||
+    !plannerProvider.value || !plannerGoal.value.trim();
+  stop.hidden = !active?.workflowPlanner;
+  stop.disabled = active?.status === "stopping";
+  const edit = get("workflow-plan-edit", HTMLButtonElement);
+  edit.hidden = !plannerDraft;
+  edit.disabled = plannerBusy;
+  const fresh = get("workflow-plan-new", HTMLButtonElement);
+  fresh.hidden = !plannerTurns.length;
+  fresh.disabled = plannerBusy;
+  status.textContent = plannerBusy ? "Planning your workflow…"
+    : active ? "Finish or stop the current run before planning."
+    : !plannerProvider.value ? "Set up a connector to plan a workflow." : "";
+}
+
+function renderPlannerMessages() {
+  const feed = get("workflow-plan-messages");
+  feed.replaceChildren(...plannerTurns.map((turn) => {
+    const section = element("section", "conversation-turn");
+    section.append(feedEntry("You", turn.prompt, "user"));
+    if (turn.result) {
+      section.append(turn.result.failed ? element("p", "workflow-error", turn.result.reply)
+        : agentReply("Workflow planner", turn.result.reply));
+      const totals = usageRows(turn.result.usage);
+      section.append(totals.length ? facts(totals) : element("p", "connector-note", "The provider reported no usage."));
+      if (turn.result.workflow) {
+        const steps = element("ol", "workflow-plan-steps");
+        for (const step of turn.result.workflow.steps) {
+          const description = step.kind === "agent"
+            ? `${providerNames[step.providerId]} · ${step.model || "Connector default"}` : "Review gate";
+          steps.append(element("li", "", `${step.title} · ${description}`));
+        }
+        section.append(steps);
+      }
+    }
+    if (turn.error) section.append(element("p", "workflow-error", turn.error));
+    return section;
+  }));
+}
+
+function openWorkflowPlanner() {
+  workflowView = { kind: "plan" };
+  showView("workflows");
+  plannerGoal.focus();
+}
+
+async function submitWorkflowPlan() {
+  const providerId = plannerProvider.value;
+  const prompt = plannerGoal.value.trim();
+  if (plannerBusy || activeRun() || !isPlannerProvider(providerId) || !prompt) return;
+  if (prompt.length > plannerGoal.maxLength) {
+    get("workflow-plan-status").textContent = `Keep the goal to ${plannerGoal.maxLength.toLocaleString()} characters.`;
+    return;
+  }
+  const turn: typeof plannerTurns[number] = { prompt };
+  const history = plannerTurns.flatMap((earlier) => earlier.result && !earlier.result.failed
+    ? [{ prompt: earlier.prompt, reply: earlier.result.reply }] : []).slice(-2);
+  plannerTurns.push(turn);
+  plannerGoal.value = "";
+  plannerBusy = true;
+  renderPlannerControls();
+  renderPlannerMessages();
+  renderControls();
+  try {
+    turn.result = await api.planWorkflow({ providerId, model: plannerModel.value, prompt, previous: plannerDraft, history });
+    plannerDraft = turn.result.workflow ?? plannerDraft;
+  } catch (error) {
+    turn.error = actionMessage(error, "Could not generate a workflow.");
+  } finally {
+    plannerBusy = false;
+    renderPlannerMessages();
+    renderPlannerControls();
+    renderControls();
+    if (workflowView.kind === "plan" && !get("workflows").hidden) plannerGoal.focus();
+  }
+}
+
+function renderSubagentModels() {
+  for (const list of document.querySelectorAll<HTMLDataListElement>("[data-subagent-models]")) {
+    const provider = list.dataset.subagentModels;
+    if (!supportsWorktreeEditing(provider)) continue;
+    if (!modelCatalogs[provider] && connectors.some((entry) => entry.id === provider && entry.status === "detected")) {
+      void refreshModels(provider);
+    }
+    list.replaceChildren(...(modelCatalogs[provider]?.models ?? []).filter((entry) => entry.available).map((entry) => {
+      const option = element("option", "", entry.name);
+      option.value = entry.id;
+      return option;
+    }));
+  }
+}
 const workflowStatusLabels = {
   running: "Running",
   waiting: "Waiting for review",
@@ -1801,11 +1948,6 @@ async function loadWorkflowRuns() {
 }
 
 async function loadWorkflows() {
-  if (!folder) {
-    workflows = [];
-    renderWorkflowSidebar();
-    return;
-  }
   try {
     workflows = await api.listWorkflows();
   } catch (error) {
@@ -1823,7 +1965,7 @@ async function refreshWorkflows() {
   try {
     workflows = await api.listWorkflows();
     await loadWorkflowRuns();
-    workflowNote = "Workflows reloaded from the project.";
+    workflowNote = "Saved workflows reloaded.";
   } catch (error) {
     workflowError = workflowErrorText(error);
   } finally {
@@ -1853,12 +1995,16 @@ function renderWorkflowSidebar() {
   const solo = get("select-solo");
   if (workflowView.kind === "solo") solo.setAttribute("aria-current", "true");
   else solo.removeAttribute("aria-current");
+  const planner = get("plan-workflow");
+  if (workflowView.kind === "plan") planner.setAttribute("aria-current", "true");
+  else planner.removeAttribute("aria-current");
   get("refresh-workflows", HTMLButtonElement).disabled = workflowBusy;
 }
 
 function renderWorkflows() {
   get("workflow-solo").hidden = workflowView.kind !== "solo";
-  get("workflow-panel").hidden = workflowView.kind === "solo";
+  get("workflow-panel").hidden = workflowView.kind === "solo" || workflowView.kind === "plan";
+  get("workflow-planner").hidden = workflowView.kind !== "plan";
   renderWorkflowSidebar();
   renderWorkflowPanel();
 }
@@ -1869,8 +2015,15 @@ function renderWorkflowPanel() {
     panel.replaceChildren();
     return;
   }
+  if (workflowView.kind === "plan") {
+    panel.replaceChildren();
+    renderPlannerModels();
+    renderPlannerMessages();
+    return;
+  }
   if (workflowView.kind === "edit") {
     panel.replaceChildren(...workflowEditor(workflowView.draft, workflowView.existing));
+    renderSubagentModels();
     return;
   }
   if (workflowView.kind === "run") {
@@ -1929,7 +2082,9 @@ function workflowDetail(workflow: SavedWorkflow) {
   const run = element("button", "button button-primary", "Run workflow");
   run.type = "button";
   run.dataset.action = "run-workflow";
-  run.disabled = workflowBusy || !folder;
+  const needsProject = workflowRequiresProject(workflow);
+  const project = mode === "code" ? folder : undefined;
+  run.disabled = workflowBusy || (needsProject && !project);
   const edit = element("button", "button", "Edit");
   edit.type = "button";
   edit.dataset.action = "edit-workflow";
@@ -1940,11 +2095,13 @@ function workflowDetail(workflow: SavedWorkflow) {
   remove.disabled = workflowBusy;
   actions.append(run, edit, remove);
 
-  const hint = element("p", "workflow-note", folder
-    ? `Runs in ${folder.name}. Definitions live in .honeycomb/workflows/.`
-    : "Choose a project in Chats to run this workflow.");
+  const hint = element("p", "workflow-note", needsProject
+    ? project ? `Code steps run in ${project.name}.` : "Choose a project in Code to run this workflow’s Code steps."
+    : "This workflow runs in Chat without a project.");
+  const command = element("p", "workflow-note");
+  command.append("Run from Chats with ", element("code", "", `/workflow ${workflow.id} <prompt>`));
   const history = workflowRunHistory(workflow.id);
-  return [header, flow, ...workflowMessages(), actions, hint, ...(history ? [history] : [])];
+  return [header, flow, ...workflowMessages(), actions, hint, command, ...(history ? [history] : [])];
 }
 
 function workflowRunHistory(workflowId: string) {
@@ -2038,7 +2195,7 @@ function editorStepCard(step: WorkflowStep, index: number, steps: readonly Workf
   const head = element("div", "workflow-step-head");
   head.append(element("span", "workflow-step-index", `${index + 1}`));
   head.append(workflowTextInput(step.title, { field: "title", step: step.id, max: 80 }));
-  head.append(element("span", "workflow-step-kind", step.kind === "agent" ? "Agent" : "Review gate"));
+  head.append(element("span", "workflow-step-kind", step.kind === "agent" ? "Subagent" : "Review gate"));
   const controls = element("div", "workflow-step-controls");
   for (const [action, label, disabled] of [
     ["step-up", "Move up", index === 0],
@@ -2058,11 +2215,14 @@ function editorStepCard(step: WorkflowStep, index: number, steps: readonly Workf
 
   if (step.kind === "agent") {
     const row = element("div", "workflow-field-row");
+    const model = workflowTextInput(step.model, { field: "model", step: step.id, max: 200, placeholder: "Connector default" });
+    const suggestions = element("datalist");
+    suggestions.id = `workflow-models-${step.id}`;
+    suggestions.dataset.subagentModels = step.providerId;
+    model.setAttribute("list", suggestions.id);
     row.append(
       workflowField("Connector", workflowSelect(workflowProviderOptions, step.providerId, "providerId", step.id)),
-      workflowField("Model", workflowTextInput(step.model, {
-        field: "model", step: step.id, max: 200, placeholder: "Connector default",
-      })),
+      workflowField("Model", model),
       workflowField("Thinking effort", workflowTextInput(step.effort, {
         field: "effort", step: step.id, max: 40, placeholder: "Connector default",
       })),
@@ -2073,7 +2233,7 @@ function editorStepCard(step: WorkflowStep, index: number, steps: readonly Workf
       workflowField("Time limit (seconds)",
         workflowNumberInput(step.timeoutMs / 1000, "timeoutSeconds", step.id, MIN_STEP_TIMEOUT_MS / 1000, MAX_STEP_TIMEOUT_MS / 1000)),
     );
-    card.append(row, row2);
+    card.append(row, row2, suggestions);
 
     const edit = element("label", "workflow-check");
     const box = element("input");
@@ -2130,7 +2290,7 @@ function workflowEditor(draft: WorkflowDefinition, existing: boolean) {
 
   const steps = draft.steps.map((step, index) => editorStepCard(step, index, draft.steps));
   const actions = element("div", "workflow-actions");
-  const addAgent = element("button", "button", "Add agent step");
+  const addAgent = element("button", "button", "Add subagent");
   addAgent.type = "button";
   addAgent.dataset.action = "add-agent";
   addAgent.disabled = draft.steps.length >= MAX_WORKFLOW_STEPS;
@@ -2215,8 +2375,11 @@ function onWorkflowInput(event: Event) {
       return;
     case "providerId": {
       if (step.kind !== "agent") return;
-      step.providerId = value === "opencode" || value === "claude" ? value : "codex";
-      if (!supportsWorktreeEditing(step.providerId)) step.edit = false;
+      const provider = value === "opencode" || value === "claude" ? value : "codex";
+      if (provider === step.providerId) return;
+      step.providerId = provider;
+      step.model = "";
+      step.effort = "";
       renderWorkflowPanel();
       return;
     }
@@ -2360,7 +2523,7 @@ async function saveWorkflow() {
     workflows = [...workflows.filter((entry) => entry.id !== saved.id), saved]
       .sort((a, b) => a.name.localeCompare(b.name));
     workflowView = { kind: "detail", id: saved.id };
-    workflowNote = "Workflow saved in .honeycomb/workflows/.";
+    workflowNote = "Workflow saved in Honeycomb.";
   } catch (error) {
     workflowError = workflowErrorText(error);
   } finally {
@@ -2526,9 +2689,11 @@ function workflowRunView(record: WorkflowRun) {
   const status = element("p", "workflow-run-status");
   status.append(
     workflowBadge(record.status, workflowStatusLabels[record.status]),
-    element("span", "workflow-step-meta", `${record.folder.name} · started ${new Date(record.startedAt).toLocaleTimeString()}`),
+    element("span", "workflow-step-meta", `${record.folder?.name ?? "Chat"} · started ${new Date(record.startedAt).toLocaleTimeString()}`),
   );
   header.append(title, status);
+  const totalUsage = usageRows(record.usage);
+  if (totalUsage.length) header.append(facts(totalUsage));
 
   const actions = element("div", "workflow-actions");
   const back = element("button", "button", "Workflow");
@@ -2561,6 +2726,8 @@ function workflowRunView(record: WorkflowRun) {
       ? `${providerNames[step.providerId]} · ${step.model || "Connector default"}${step.effort ? ` · ${effortLabel(step.effort)}` : ""} · ${step.edit ? "Edit in worktree" : step.mode === "chat" ? "Chat" : "Read-only"}`
       : `Review gate · up to ${step.maxRevisions} ${step.maxRevisions === 1 ? "revision" : "revisions"}`;
     item.append(element("p", "workflow-step-meta", meta));
+    const stepUsage = usageRows(stepRun?.usage);
+    if (stepUsage.length) item.append(facts(stepUsage));
     if (stepRun?.detail) item.append(element("p", "workflow-note", stepRun.detail));
 
     const run = stepRun?.runId ? runs.get(stepRun.runId) : undefined;
@@ -2581,6 +2748,7 @@ function workflowRunView(record: WorkflowRun) {
 
   return [
     header,
+    ...(record.goal ? [feedEntry("Workflow prompt", record.goal, "user")] : []),
     ...workflowMessages(),
     ...(record.error && !workflowError ? [element("p", "workflow-note", record.error)] : []),
     actions,
@@ -2685,6 +2853,40 @@ get("new-workflow").addEventListener("click", () => {
   workflowConfirmDelete = false;
   renderWorkflows();
   get("workflow-panel").querySelector<HTMLInputElement>('input[data-field="workflow-name"]')?.focus();
+});
+get("plan-workflow").addEventListener("click", () => openWorkflowPlanner());
+plannerProvider.addEventListener("change", () => {
+  plannerModel.value = "";
+  renderPlannerModels();
+});
+plannerGoal.addEventListener("input", renderPlannerControls);
+get("workflow-plan-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  void submitWorkflowPlan();
+});
+get("workflow-plan-edit").addEventListener("click", () => {
+  if (!plannerDraft || plannerBusy) return;
+  workflowView = { kind: "edit", draft: cloneWorkflow(plannerDraft), existing: Boolean(workflowById(plannerDraft.id)) };
+  workflowError = "";
+  workflowNote = "";
+  workflowConfirmDelete = false;
+  renderWorkflows();
+  document.querySelector<HTMLInputElement>('#workflow-panel [data-field="workflow-name"]')?.focus();
+});
+get("workflow-plan-new").addEventListener("click", () => {
+  if (plannerBusy) return;
+  plannerDraft = undefined;
+  plannerTurns.length = 0;
+  plannerGoal.value = "";
+  renderPlannerMessages();
+  renderPlannerControls();
+  plannerGoal.focus();
+});
+get("workflow-plan-stop").addEventListener("click", () => {
+  const run = activeRun();
+  if (run?.workflowPlanner) void api.stopRun(run.id).catch((error) => {
+    get("workflow-plan-status").textContent = actionMessage(error, "Could not stop the planner.");
+  });
 });
 get("refresh-workflows").addEventListener("click", () => void refreshWorkflows());
 get("workflow-panel").addEventListener("click", (event) => {
@@ -2855,12 +3057,40 @@ async function startTask() {
 get("composer").addEventListener("submit", (event) => {
   event.preventDefault();
   if (runButton.disabled) return;
+  const invocation = workflowCommand(promptField.value);
+  if (invocation !== undefined) {
+    void runWorkflowFromChat(invocation);
+    return;
+  }
   if (providerField.value === "freebuff") {
     const existing = latestActiveFreebuff();
     void freebuffAction("send", existing?.id);
   }
   else void startTask();
 });
+
+async function runWorkflowFromChat(invocation: string) {
+  if (starting || workflowBusy) return;
+  const draft = promptField.value;
+  starting = true;
+  actionError = "";
+  renderControls();
+  try {
+    const projectPath = mode === "code" ? (selectedChatId ? chatTurns()[0]?.folder?.path : newProjectPath) : undefined;
+    const runId = await api.runWorkflowCommand({ argument: invocation, projectPath });
+    if (promptField.value === draft) promptField.value = "";
+    await loadWorkflowRuns();
+    workflowView = { kind: "run", runId };
+    workflowError = "";
+    workflowNote = "";
+    showView("workflows");
+  } catch (error) {
+    showError(error);
+  } finally {
+    starting = false;
+    renderControls();
+  }
+}
 
 function refreshLatestFreebuff() {
   if (worktreeBusy || mode !== "code" || !folder) return;
@@ -2875,6 +3105,7 @@ window.addEventListener("focus", refreshLatestFreebuff);
 api.onRunChanged((run) => {
   const previous = runs.get(run.id);
   if (!remember(run)) return;
+  if (workflowView.kind === "plan") renderPlannerControls();
   scheduleWorkflowRunRender(run);
   if (previous?.status === run.status) {
     if (selectedChatId === conversationId(run)) {

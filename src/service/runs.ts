@@ -377,6 +377,7 @@ export function createRunService(
         ...(edit ? { edit: true } : {}),
         ...(worktree ? { worktree: { ...worktree } } : {}),
         ...(workflowRunId === undefined ? {} : { workflowRunId }),
+        ...(payload?.workflowPlanner === true && mode === "chat" ? { workflowPlanner: true as const } : {}),
         ...(modelOverride ? { modelOverride } : {}),
         ...(timeoutMs === undefined ? {} : { timeoutMs }),
         prompt,

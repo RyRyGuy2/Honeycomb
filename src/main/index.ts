@@ -18,13 +18,15 @@ import { runProcess } from "../service/process.js";
 import { FREEBUFF_EXPORT_PATTERN, findFreebuffTerminal, findFreebuffTranscript, openFreebuffTerminal, readFreebuffTranscript, readSavedFreebuffExchange, readSavedFreebuffExchanges } from "../service/freebuff.js";
 import { createRunService } from "../service/runs.js";
 import { createWorkflowRunner } from "../service/workflow-runner.js";
+import { MAX_PLAN_GOAL, workflowPlanPrompt, workflowPlanReply } from "../service/workflow-planner.js";
 import { createWorkflowRunStore } from "../service/workflow-runs.js";
 import { createWorkflowStore } from "../service/workflows.js";
 import { createWorkspaceStore } from "../service/workspace.js";
 import { createWorktreeManager } from "../service/worktree.js";
-import type { CliProviderId, FreebuffContext, IpcCalls, ProjectFolder, WorkflowChange, WorkspaceMode } from "../shared/contracts.js";
+import type { CliProviderId, FreebuffContext, IpcCalls, ProjectFolder, WorkflowChange, WorkflowDefinition, WorkspaceMode } from "../shared/contracts.js";
 import { supportsWorktreeEditing } from "../shared/editing.js";
 import { asRecord } from "../shared/records.js";
+import { resolveWorkflowCommand, validateWorkflow, workflowRequiresProject } from "../shared/workflows.js";
 
 const APP_URL = "honeycomb://app/";
 const APP_ICON = fileURLToPath(new URL("./honeycomb-icon.png", import.meta.url));
@@ -118,7 +120,7 @@ const runs = createRunService((run) => {
       streamHttpChat(connection, model, messages, AbortSignal.any([signal, AbortSignal.timeout(300_000)]), receive),
   };
 });
-const workflowStore = createWorkflowStore(() => folder?.path);
+const workflowStore = createWorkflowStore(() => app.getPath("userData"));
 const workflowRunStore = createWorkflowRunStore(() => join(app.getPath("userData"), "workflow-runs.json"));
 const workflowRuns = createWorkflowRunner({
   runs,
@@ -129,8 +131,19 @@ function notifyWorkflowDefinitions() {
   send("honeycomb:workflow-changed", { type: "definitions" } satisfies WorkflowChange);
 }
 
+async function startSavedWorkflow(workflow: WorkflowDefinition, project: ProjectFolder | undefined, goal?: string) {
+  if (runs.hasActiveRun()) throw new Error("Finish or stop the active run before starting a workflow.");
+  const needsProject = workflowRequiresProject(workflow);
+  if (needsProject) {
+    if (!project) throw new Error("Choose a project in Code to run this workflow’s Code steps.");
+    if (workflow.steps.some((step) => step.kind === "agent" && step.edit)) await worktrees.inspect(project.path);
+    if (mode !== "code" || folder?.path !== project.path) throw new Error("The selected project changed. Try again.");
+  }
+  return workflowRuns.start(needsProject ? project : undefined, workflow, goal);
+}
+
 function workspaceState() {
-  return { folder, projects, runs: runs.history(), mode, worktrees: worktrees.records() };
+  return { folder, projects, runs: runs.history().filter((run) => !run.workflowPlanner), mode, worktrees: worktrees.records() };
 }
 
 async function removeProject(path: string) {
@@ -158,6 +171,16 @@ async function listClaudeModels(signal: AbortSignal) {
   const { connector, executable } = await checkProvider(claude, signal);
   const catalog = claudeModelCatalog(selectedModels.claude);
   return executable ? catalog : { ...catalog, localError: connector.detail || "Install Claude Code to use its models." };
+}
+
+function listCliModels(providerId: CliProviderId, signal: AbortSignal) {
+  if (providerId === "claude") return listClaudeModels(signal);
+  return providerId === "codex" ? listCodexModels(selectedModels.codex, signal)
+    : listOpenCodeModels(getOpenCodePath(), selectedModels.opencode, signal);
+}
+
+function listConnectionModels(id: string) {
+  return listHttpChatModels(chatProfiles.connection(id), AbortSignal.any([connectorAbort.signal, AbortSignal.timeout(15_000)]));
 }
 
 function trackConnectorJob<T>(job: Promise<T>) {
@@ -247,7 +270,7 @@ function registerHandlers() {
       type: "warning",
       title: "Factory reset Honeycomb",
       message: "Erase Honeycomb’s local data and restart?",
-      detail: "This permanently clears chat and workflow history, saved projects, connector settings and API keys, app-managed downloads, and the Copilot Web sign-in. Project files and Git worktrees stay on disk.",
+      detail: "This permanently clears chat and workflow history, Honeycomb’s saved workflows, saved projects, connector settings and API keys, app-managed downloads, and the Copilot Web sign-in. Project files and Git worktrees stay on disk.",
       buttons: ["Cancel", "Reset and restart"],
       defaultId: 0,
       cancelId: 0,
@@ -346,16 +369,10 @@ function registerHandlers() {
   handle("sign-in-copilot-web", () => trackConnectorJob(copilotWeb.signIn(connectorAbort.signal)));
   handle("install-opencode", installOpenCode);
   handle("list-models", (value) => {
-    if (chatProfiles.find(value)) {
-      return trackConnectorJob(listHttpChatModels(chatProfiles.connection(value),
-        AbortSignal.any([connectorAbort.signal, AbortSignal.timeout(15_000)])));
-    }
+    const profile = chatProfiles.find(value);
+    if (profile) return trackConnectorJob(listConnectionModels(profile.id));
     const providerId = requireProviderId(value);
-    const signal = connectorAbort.signal;
-    if (providerId === "claude") return trackConnectorJob(listClaudeModels(signal));
-    return trackConnectorJob(providerId === "codex"
-      ? listCodexModels(selectedModels.codex, signal)
-      : listOpenCodeModels(getOpenCodePath(), selectedModels.opencode, signal));
+    return trackConnectorJob(listCliModels(providerId, connectorAbort.signal));
   });
   handle("list-opencode-efforts", (value) =>
     trackConnectorJob(listOpenCodeEfforts(getOpenCodePath(), parseOpenCodeModel(value), connectorAbort.signal)));
@@ -474,6 +491,47 @@ function registerHandlers() {
     return true;
   });
   handle("list-workflows", () => workflowStore.list());
+  handle("plan-workflow", async (value) => {
+    if (runs.hasActiveRun() || workflowRuns.hasActiveRun()) throw new Error("Finish or stop the current run before planning.");
+    const payload = asRecord(value);
+    const profile = chatProfiles.find(payload?.providerId);
+    const providerId = profile?.id ?? requireProviderId(payload?.providerId);
+    const cli = supportsWorktreeEditing(providerId) ? providerId : undefined;
+    let model = cli ? modelParsers[cli](payload?.model ?? "") : parseChatModel(payload?.model ?? "");
+    const goal = typeof payload?.prompt === "string" ? payload.prompt.trim() : "";
+    if (!goal || goal.length > MAX_PLAN_GOAL || /[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(goal)) {
+      throw new Error(`Enter a workflow goal of 1 to ${MAX_PLAN_GOAL} characters.`);
+    }
+    const previous = payload?.previous === undefined ? undefined : validateWorkflow(payload.previous);
+    const history = Array.isArray(payload?.history) ? payload.history.slice(-2).map((entry: unknown) => {
+      const turn = asRecord(entry);
+      if (typeof turn?.prompt !== "string" || typeof turn.reply !== "string") return "";
+      return `User: ${turn.prompt.slice(0, 350)}\nPlanner: ${turn.reply.slice(0, 250)}`;
+    }).join("\n") : "";
+    const available = (await inspectProviders(getOpenCodePath())).flatMap((connector) =>
+      connector.status === "detected" && supportsWorktreeEditing(connector.id) ? [connector.id] : []);
+    if (cli && !available.includes(cli)) throw new Error("Choose an installed connector to plan this workflow.");
+    if (!available.length) throw new Error("Set up Codex, OpenCode, or Claude Code to run workflow subagents.");
+    const models = new Map(await Promise.all(available.map(async (id) => {
+      const catalog = await trackConnectorJob(listCliModels(id, connectorAbort.signal)).catch(() => undefined);
+      return [id, catalog?.models.filter((entry) => entry.available).map((entry) => entry.id) ?? []] as const;
+    })));
+    const profileModels = profile ? await trackConnectorJob(listConnectionModels(profile.id)) : undefined;
+    const selectable = cli ? models.get(cli) : profileModels?.models.filter((entry) => entry.available).map((entry) => entry.id);
+    if (model && !selectable?.includes(model)) throw new Error("Choose a model listed for the planner connector.");
+    if (profile) model ||= profileModels?.selected ?? "";
+    if (workflowRuns.hasActiveRun()) throw new Error("Finish or stop the workflow before planning.");
+    const id = runs.start(undefined, {
+      providerId, model, modelOverride: model, mode: "chat", workflowPlanner: true,
+      prompt: workflowPlanPrompt(goal, models, previous, history),
+    });
+    const run = await runs.waitForRun(id);
+    try {
+      return workflowPlanReply(run, models, previous);
+    } catch (error) {
+      return { reply: error instanceof Error ? error.message : "Could not generate a workflow.", usage: run.usage, failed: true };
+    }
+  });
   handle("save-workflow", async (value) => {
     const saved = await workflowStore.save(value);
     notifyWorkflowDefinitions();
@@ -487,18 +545,17 @@ function registerHandlers() {
   handle("list-workflow-runs", () => workflowRuns.history());
   handle("start-workflow", async (value) => {
     if (typeof value !== "string") throw new Error("Invalid workflow.");
-    if (mode !== "code") throw new Error("Switch to Code to run a workflow.");
-    const project = folder;
-    if (!project) throw new Error("Choose a project folder first.");
-    if (runs.hasActiveRun()) throw new Error("Finish or stop the active run before starting a workflow.");
+    const project = mode === "code" ? folder : undefined;
     const workflow = (await workflowStore.list()).find((entry) => entry.id === value);
     if (!workflow) throw new Error("This workflow is no longer saved.");
-    // Editing steps need Git up front so the first step does not fail halfway through the workflow.
-    if (workflow.steps.some((step) => step.kind === "agent" && step.edit)) {
-      await worktrees.inspect(project.path);
-      if (mode !== "code" || folder?.path !== project.path) throw new Error("The selected project changed. Try again.");
-    }
-    return workflowRuns.start(project, workflow);
+    return startSavedWorkflow(workflow, project);
+  });
+  handle("run-workflow-command", async (value) => {
+    const { argument, projectPath } = asRecord(value) ?? {};
+    if (typeof argument !== "string" || argument.length > 8_000 || argument.includes("\0")) throw new Error("Enter a valid workflow command.");
+    const project = mode === "code" && folder?.path === projectPath ? folder : undefined;
+    const { workflow, goal } = resolveWorkflowCommand(argument, await workflowStore.list());
+    return startSavedWorkflow(workflow, project, goal);
   });
   handle("stop-workflow", async (value) => {
     if (typeof value !== "string") throw new Error("Invalid workflow run.");
@@ -607,6 +664,9 @@ app.whenReady().then(async () => {
     }
     if (saved.mode === "chat") mode = "chat";
   }
+  await workflowStore.importLegacy(projects.map((project) => project.path)).catch((error) => {
+    console.error("Could not finish importing project workflows", error);
+  });
   await Promise.all([chatProfiles.load().catch((error) => console.error("Could not read chat connections", error)), ...PROVIDER_IDS.map(async (providerId) => {
     try {
       selectedModels[providerId] = modelParsers[providerId](await readFile(modelFile(providerId), "utf8"));

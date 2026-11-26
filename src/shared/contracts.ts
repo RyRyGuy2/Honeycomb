@@ -150,6 +150,7 @@ export interface Run {
   diff?: RunDiff;
   /** The workflow run that started this turn, when it came from a workflow step. */
   workflowRunId?: string;
+  workflowPlanner?: true;
   /** Per-run model chosen by a workflow step. Blank turns use the connector selection. */
   modelOverride?: string;
   /** Per-run time limit in milliseconds. */
@@ -243,6 +244,7 @@ export interface WorkflowStepRun {
   /** Rejections handled at this gate. */
   revisions?: number;
   detail?: string;
+  usage?: RunUsage;
 }
 
 /** A workflow run record. Honeycomb keeps these in userData, never in the project. */
@@ -251,7 +253,8 @@ export interface WorkflowRun {
   workflowId: string;
   workflowName: string;
   definition: WorkflowDefinition;
-  folder: ProjectFolder;
+  folder?: ProjectFolder;
+  goal?: string;
   status: WorkflowRunStatus;
   startedAt: string;
   finishedAt?: string;
@@ -259,7 +262,23 @@ export interface WorkflowRun {
   steps: WorkflowStepRun[];
   worktree?: RunWorktree;
   error?: string;
+  usage?: RunUsage;
   revision: number;
+}
+
+export interface WorkflowPlanRequest {
+  providerId: CliProviderId | ChatProfileId;
+  model: string;
+  prompt: string;
+  previous?: WorkflowDefinition;
+  history?: Array<{ prompt: string; reply: string }>;
+}
+
+export interface WorkflowPlanReply {
+  reply: string;
+  workflow?: WorkflowDefinition;
+  usage: RunUsage;
+  failed?: true;
 }
 
 export type WorkflowGateDecision = "approved" | "rejected";
@@ -319,10 +338,12 @@ export interface IpcCalls {
   "discard-worktree": (worktreeId: string) => boolean;
   "sidebar-menu": (request: SidebarMenuRequest) => boolean;
   "list-workflows": () => SavedWorkflow[];
+  "plan-workflow": (request: WorkflowPlanRequest) => WorkflowPlanReply;
   "save-workflow": (workflow: WorkflowDefinition) => SavedWorkflow;
   "delete-workflow": (id: string) => boolean;
   "list-workflow-runs": () => WorkflowRun[];
   "start-workflow": (id: string) => string;
+  "run-workflow-command": (request: { argument: string; projectPath?: string }) => string;
   "stop-workflow": (runId: string) => void;
   "workflow-decision": (request: WorkflowDecisionRequest) => void;
 }
@@ -362,10 +383,12 @@ export interface HoneycombApi {
   discardWorktree: Invoke<"discard-worktree">;
   showSidebarMenu: Invoke<"sidebar-menu">;
   listWorkflows: Invoke<"list-workflows">;
+  planWorkflow: Invoke<"plan-workflow">;
   saveWorkflow: Invoke<"save-workflow">;
   deleteWorkflow: Invoke<"delete-workflow">;
   listWorkflowRuns: Invoke<"list-workflow-runs">;
   startWorkflow: Invoke<"start-workflow">;
+  runWorkflowCommand: Invoke<"run-workflow-command">;
   stopWorkflow: Invoke<"stop-workflow">;
   decideWorkflow: Invoke<"workflow-decision">;
   onRunChanged(callback: (run: Run) => void): () => void;

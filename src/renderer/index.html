@@ -63,6 +63,7 @@
 
       <aside id="workflows-sidebar" class="sidebar-panel" aria-labelledby="workflows-sidebar-title" hidden>
         <h2 id="workflows-sidebar-title" class="sidebar-title">Workflows</h2>
+        <button type="button" id="plan-workflow" class="button sidebar-action">Plan a workflow</button>
         <button type="button" id="new-workflow" class="button sidebar-action">
           <span aria-hidden="true">+</span> New workflow
         </button>
@@ -195,6 +196,29 @@
       </section>
       </div>
       <div id="workflow-panel" class="workflow-panel" hidden></div>
+      <section id="workflow-planner" aria-labelledby="workflow-planner-title" hidden>
+        <div class="library-header">
+          <h1 id="workflow-planner-title">Workflow planner</h1>
+          <p>Describe a goal, then review the subagents and gates in the draft.</p>
+        </div>
+        <div id="workflow-plan-messages" class="feed" aria-live="polite"></div>
+        <form id="workflow-plan-form" class="connector-card">
+          <div class="workflow-field-row">
+            <label class="model-field">Planner connector<select id="workflow-plan-provider" class="connector-input"></select></label>
+            <label class="model-field">Model<select id="workflow-plan-model" class="connector-input"></select></label>
+          </div>
+          <label class="model-field" for="workflow-plan-goal">Goal or follow-up
+            <textarea id="workflow-plan-goal" class="workflow-input" rows="3" maxlength="2000" required></textarea>
+          </label>
+          <div class="workflow-actions">
+            <button type="submit" id="workflow-plan-send" class="button button-primary">Send</button>
+            <button type="button" id="workflow-plan-stop" class="button" hidden>Stop</button>
+            <button type="button" id="workflow-plan-edit" class="button" hidden>Edit draft</button>
+            <button type="button" id="workflow-plan-new" class="button" hidden>New plan</button>
+          </div>
+          <p id="workflow-plan-status" class="connector-note" role="status"></p>
+        </form>
+      </section>
     </main>
 
     <main id="connectors" class="library" hidden>
@@ -304,7 +328,7 @@
       </div>
       <section class="connector-card" aria-labelledby="factory-reset-title">
         <h2 id="factory-reset-title">Factory reset</h2>
-        <p class="connector-note" id="factory-reset-description">Clear Honeycomb’s local history, project list, connectors, and Copilot Web sign-in. Project files and Git worktrees stay on disk.</p>
+        <p class="connector-note" id="factory-reset-description">Clear Honeycomb’s local history, saved workflows, project list, connectors, and Copilot Web sign-in. Project files and Git worktrees stay on disk.</p>
         <button type="button" id="factory-reset" class="button button-danger" aria-describedby="factory-reset-description">Factory reset</button>
         <p id="factory-reset-status" class="chat-status" role="status"></p>
       </section>

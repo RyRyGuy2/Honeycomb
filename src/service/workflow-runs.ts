@@ -6,7 +6,7 @@ function isSavedRun(value: unknown): value is WorkflowRun {
   if (!value || typeof value !== "object") return false;
   const run = value as Partial<WorkflowRun>;
   return typeof run.id === "string" && typeof run.workflowId === "string" && typeof run.status === "string" &&
-    Array.isArray(run.steps) && Boolean(run.definition) && Boolean(run.folder) && typeof run.startedAt === "string";
+    Array.isArray(run.steps) && Boolean(run.definition) && typeof run.startedAt === "string";
 }
 
 /** Workflow run records live in userData so the project never gains run history. */

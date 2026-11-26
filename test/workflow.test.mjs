@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createWorkflowRunner } from "../dist/service/workflow-runner.js";
+import { workflowPlanPrompt, workflowPlanReply } from "../dist/service/workflow-planner.js";
 import { createWorkflowRunStore } from "../dist/service/workflow-runs.js";
 import { createWorkflowStore } from "../dist/service/workflows.js";
 import {
-  MAX_HANDOFF, MAX_STEP_PROMPT, runSummary, validateWorkflow, workflowStepPrompt,
+  MAX_HANDOFF, MAX_STEP_PROMPT, resolveWorkflowCommand, runSummary, validateWorkflow, workflowStepPrompt,
 } from "../dist/shared/workflows.js";
 
 const project = { name: "Example", path: process.cwd() };
@@ -68,6 +69,7 @@ function fakeRuns() {
       const run = records.get(runId);
       assert.ok(run, `run ${runId} exists`);
       run.status = status;
+      if (options.usage) run.usage = options.usage;
       if (options.worktree) run.worktree = { ...options.worktree };
       if (options.message) {
         run.events.push({
@@ -98,6 +100,27 @@ test("validation keeps a blank model and trims the definition", () => {
   assert.equal(parsed.steps[0].inputs.length, 0);
   assert.equal(parsed.steps[1].maxRevisions, 1);
   assert.deepEqual(validateWorkflow({ ...workflow(), name: "  Spaced  " }).name, "Spaced");
+});
+
+test("the workflow planner validates available models and keeps the draft identity on revision", () => {
+  const catalogs = new Map([["codex", ["gpt-example"]]]);
+  const definition = { name: "Review docs", steps: [agent({ model: "gpt-example" }), gate()] };
+  const usage = { inputTokens: 103, outputTokens: 72 };
+  function reply(workflow) {
+    const body = JSON.stringify({ reply: "Drafted a review workflow.", workflow });
+    return { status: "completed", usage, events: [{ type: "message", text: "```json\n" + body + "\n```" }] };
+  }
+  const first = workflowPlanReply(reply(definition), catalogs);
+  assert.equal(first.workflow.steps[0].model, "gpt-example");
+  assert.deepEqual(first.usage, usage);
+  assert.equal(workflowPlanReply(reply(definition), catalogs, first.workflow).workflow.id, first.workflow.id);
+  assert.equal(workflowPlanReply(reply(null), catalogs).workflow, undefined);
+  assert.throws(() => workflowPlanReply(reply({ ...definition, steps: [agent({ model: "invented-model" })] }), catalogs),
+    /unavailable connector or model/);
+  const prompt = workflowPlanPrompt("x".repeat(2_000), catalogs, first.workflow, "Earlier decision");
+  assert.ok(prompt.length < 8_000);
+  assert.match(prompt, /gpt-example/);
+  assert.match(prompt, /Earlier decision/);
 });
 
 test("validation refuses fields that would turn a definition into a program", () => {
@@ -142,7 +165,7 @@ test("handoff text is bounded and keeps gate feedback", () => {
   assert.equal(runSummary({ providerName: "Codex", status: "completed", events: [{ type: "message", text: "  the answer  " }] }), "the answer");
 });
 
-test("definitions save under .honeycomb/workflows and never escape it", async (t) => {
+test("definitions save in the app workflow library without a project", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "honeycomb-workflows-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const store = createWorkflowStore(() => directory);
@@ -150,18 +173,71 @@ test("definitions save under .honeycomb/workflows and never escape it", async (t
 
   const saved = await store.save(workflow());
   assert.equal(saved.name, "Plan and build");
-  const file = join(directory, ".honeycomb", "workflows", "plan-and-build.json");
+  const file = join(directory, "workflows", "plan-and-build.json");
   const written = JSON.parse(await readFile(file, "utf8"));
   assert.deepEqual(written, validateWorkflow(workflow()));
   assert.equal((await store.list()).length, 1);
 
-  await writeFile(join(directory, ".honeycomb", "workflows", "broken.json"), "{}", "utf8");
+  await writeFile(join(directory, "workflows", "broken.json"), "{}", "utf8");
   assert.equal((await store.list()).length, 1);
   await assert.rejects(store.remove("../plan-and-build"), /Invalid workflow/);
   assert.equal(await store.remove("plan-and-build"), true);
   assert.equal(await store.remove("plan-and-build"), false);
   assert.deepEqual(await store.list(), []);
   await assert.rejects(store.save(workflow({ steps: [agent({ command: "x" })] })), /unsupported field/);
+});
+
+test("the app imports project workflows once and keeps the original project files", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "honeycomb-workflow-import-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const projectRoot = join(root, "project");
+  const source = join(projectRoot, ".honeycomb", "workflows");
+  await mkdir(source, { recursive: true });
+  const file = join(source, "plan-and-build.json");
+  const original = JSON.stringify(workflow());
+  await writeFile(file, original, "utf8");
+  const store = createWorkflowStore(() => join(root, "app"));
+  await store.importLegacy([projectRoot]);
+  assert.deepEqual((await store.list()).map((entry) => entry.id), ["plan-and-build"]);
+  assert.equal(await readFile(file, "utf8"), original);
+  await store.remove("plan-and-build");
+  await store.importLegacy([projectRoot]);
+  assert.deepEqual(await store.list(), []);
+});
+
+test("workflow commands resolve names and IDs and require a prompt", () => {
+  const review = workflow({ id: "review", name: "Review" });
+  const detailed = workflow({ id: "review-changes", name: "Review Changes" });
+  assert.deepEqual(resolveWorkflowCommand("review CHANGES Check the importer", [review, detailed]), {
+    workflow: detailed, goal: "Check the importer",
+  });
+  assert.equal(resolveWorkflowCommand('"Review" Changes matter', [review, detailed]).workflow, review);
+  assert.equal(resolveWorkflowCommand("review-changes Check the importer", [review, detailed]).workflow, detailed);
+  assert.throws(() => resolveWorkflowCommand("Review Changes", [review, detailed]), /Workflow prompt is required/);
+  assert.throws(() => resolveWorkflowCommand("Unknown goal", [review, detailed]), /No saved workflow/);
+  assert.throws(() => resolveWorkflowCommand("Same name goal", [
+    { ...review, name: "Same name" }, { ...detailed, name: "Same name" },
+  ]), /Use its ID/);
+});
+
+test("a Chat workflow runs without a project and gives the prompt to every subagent", async () => {
+  const runs = fakeRuns();
+  const runner = createWorkflowRunner({ runs });
+  const definition = validateWorkflow(workflow({ steps: [
+    agent({ mode: "chat" }),
+    agent({ id: "check", mode: "chat", inputs: ["plan"] }),
+  ] }));
+  assert.throws(() => runner.start(undefined, validateWorkflow(workflow())), /Choose a project/);
+  const id = runner.start(undefined, definition, "Focus on migration.");
+  await until(() => runs.requests.length === 1);
+  assert.equal(runs.requests[0].folder, undefined);
+  assert.match(runs.requests[0].request.prompt, /User's workflow prompt:\nFocus on migration\./);
+  runs.finish(runs.requests[0].id, "completed", { message: "Migration plan" });
+  await until(() => runs.requests.length === 2);
+  assert.match(runs.requests[1].request.prompt, /Focus on migration[\s\S]*Migration plan/);
+  runs.finish(runs.requests[1].id, "completed");
+  await until(() => runner.find(id).status === "completed");
+  assert.equal(runner.find(id).goal, "Focus on migration.");
 });
 
 test("workflow run records round-trip through the userData store", async (t) => {
@@ -177,6 +253,8 @@ test("workflow run records round-trip through the userData store", async (t) => 
   assert.deepEqual(await store.load(), []);
   assert.equal(await store.save([record]), true);
   assert.deepEqual((await store.load()).map((run) => run.id), ["workflow-run-1"]);
+  assert.equal(await store.save([{ ...record, folder: undefined, goal: "Review migration" }]), true);
+  assert.equal((await store.load())[0].goal, "Review migration");
   await writeFile(join(directory, "workflow-runs.json"), "not json", "utf8");
   assert.deepEqual(await store.load(), []);
 });
@@ -211,7 +289,7 @@ test("rejection sends bounded feedback to the named earlier step", async () => {
   const runner = createWorkflowRunner({ runs });
   const id = runner.start(project, validateWorkflow(workflow()));
   await until(() => runs.requests.length === 1);
-  runs.finish(runs.requests[0].id, "completed", { message: "First plan." });
+  runs.finish(runs.requests[0].id, "completed", { message: "First plan.", usage: { inputTokens: 12, outputTokens: 6 } });
   await until(() => runner.find(id).status === "waiting");
 
   assert.throws(() => runner.decide({ runId: id, decision: "rejected" }), /Describe what should change/);
@@ -222,7 +300,7 @@ test("rejection sends bounded feedback to the named earlier step", async () => {
   assert.equal(runs.requests[1].request.prompt,
     "Plan the work.\n\nFeedback from the review gate:\nSplit the migration into two steps.");
 
-  runs.finish(runs.requests[1].id, "completed", { message: "Second plan." });
+  runs.finish(runs.requests[1].id, "completed", { message: "Second plan.", usage: { inputTokens: 18, outputTokens: 9 } });
   await until(() => runner.find(id).status === "waiting");
   runner.decide({ runId: id, decision: "rejected", feedback: "Still wrong." });
   await until(() => runner.find(id).status === "failed", "the revision limit");
@@ -231,6 +309,8 @@ test("rejection sends bounded feedback to the named earlier step", async () => {
   assert.equal(record.steps[0].status, "completed");
   assert.equal(record.steps[1].status, "failed");
   assert.equal(record.steps[1].revisions, 2);
+  assert.deepEqual(record.usage, { inputTokens: 30, outputTokens: 15 });
+  assert.deepEqual(record.steps[0].usage, record.usage);
 });
 
 test("an edit step creates one worktree and later steps reuse it", async () => {

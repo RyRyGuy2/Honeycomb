@@ -12,10 +12,12 @@ test("factory reset clears app state on startup and preserves project and worktr
   const project = join(root, "project");
   const worktree = join(userData, "worktrees", "project-test");
   const connector = join(userData, "connectors", "opencode");
-  for (const path of [project, worktree, connector]) await mkdir(path, { recursive: true });
+  const workflows = join(userData, "workflows");
+  for (const path of [project, worktree, connector, workflows]) await mkdir(path, { recursive: true });
   await writeFile(join(project, "project-file"), "project");
   await writeFile(join(worktree, "worktree-file"), "worktree");
   await writeFile(join(connector, "opencode"), "download");
+  await writeFile(join(workflows, "saved-workflow.json"), "workflow");
   const files = ["workspace.json", "workflow-runs.json", "chat-connections.json", "chat-connections.json.tmp", "codex-model"];
   for (const name of files) await writeFile(join(userData, name), "saved");
   let clears = 0;
@@ -27,7 +29,7 @@ test("factory reset clears app state on startup and preserves project and worktr
   assert.equal(await readFile(join(userData, "workspace.json"), "utf8"), "saved");
   await applyFactoryReset(userData, clearBrowserData);
   assert.equal(clears, 1);
-  for (const name of [...files, "connectors"]) await assert.rejects(access(join(userData, name)), { code: "ENOENT" });
+  for (const name of [...files, "connectors", "workflows"]) await assert.rejects(access(join(userData, name)), { code: "ENOENT" });
   assert.equal(await readFile(join(project, "project-file"), "utf8"), "project");
   assert.equal(await readFile(join(worktree, "worktree-file"), "utf8"), "worktree");
   await applyFactoryReset(userData, clearBrowserData);

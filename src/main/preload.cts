@@ -43,10 +43,12 @@ const api: HoneycombApi = {
   discardWorktree: (worktreeId) => invoke("discard-worktree", worktreeId),
   showSidebarMenu: (request) => invoke("sidebar-menu", request),
   listWorkflows: () => invoke("list-workflows"),
+  planWorkflow: (request) => invoke("plan-workflow", request),
   saveWorkflow: (workflow) => invoke("save-workflow", workflow),
   deleteWorkflow: (id) => invoke("delete-workflow", id),
   listWorkflowRuns: () => invoke("list-workflow-runs"),
   startWorkflow: (id) => invoke("start-workflow", id),
+  runWorkflowCommand: (request) => invoke("run-workflow-command", request),
   stopWorkflow: (runId) => invoke("stop-workflow", runId),
   decideWorkflow: (request) => invoke("workflow-decision", request),
   onRunChanged(callback) {

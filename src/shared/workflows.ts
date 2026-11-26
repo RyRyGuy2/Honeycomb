@@ -1,5 +1,5 @@
 import type {
-  CliProviderId, Run, WorkflowAgentStep, WorkflowDefinition, WorkflowGateStep, WorkflowStep,
+  CliProviderId, Run, RunUsage, WorkflowAgentStep, WorkflowDefinition, WorkflowGateStep, WorkflowStep,
 } from "./contracts.js";
 import { supportsWorktreeEditing } from "./editing.js";
 
@@ -7,6 +7,7 @@ export const WORKFLOW_PROVIDERS: readonly CliProviderId[] = ["codex", "opencode"
 export const MAX_WORKFLOW_STEPS = 20;
 export const MAX_STEP_PROMPT = 4_000;
 export const MAX_HANDOFF = 3_500;
+export const MAX_WORKFLOW_GOAL = 2_000;
 export const MAX_GATE_FEEDBACK = 2_000;
 export const MAX_STEP_INPUTS = 8;
 export const MAX_GATE_REVISIONS = 5;
@@ -151,6 +152,56 @@ export function cloneWorkflow(workflow: WorkflowDefinition): WorkflowDefinition 
   return JSON.parse(JSON.stringify(workflow)) as WorkflowDefinition;
 }
 
+export function workflowRequiresProject(workflow: WorkflowDefinition) {
+  return workflow.steps.some((step) => step.kind === "agent" && step.mode === "code");
+}
+
+export function resolveWorkflowCommand<T extends WorkflowDefinition>(argument: string, workflows: readonly T[]) {
+  const input = argument.trim();
+  if (!input) throw new Error("Use /workflow <name> <prompt> to run a saved workflow.");
+  function normalize(name: string) {
+    return name.trim().replace(/\s+/g, " ").toLowerCase();
+  }
+  function matches(name: string) {
+    const key = normalize(name);
+    const exact = workflows.find((workflow) => workflow.id === key);
+    return exact ? [exact] : workflows.filter((workflow) => normalize(workflow.name) === key);
+  }
+
+  let candidates: T[] = [];
+  let end = 0;
+  if (input.startsWith('"')) {
+    const quoted = /^"([^"]+)"(?=\s|$)/.exec(input);
+    if (!quoted?.[1]) throw new Error("Close the quotes around the workflow name.");
+    candidates = matches(quoted[1]);
+    end = quoted[0].length;
+  } else {
+    // Try each word boundary so names with spaces can be used without quotes.
+    for (const boundary of input.matchAll(/\s+|$/g)) {
+      const endOfName = boundary.index;
+      const name = input.slice(0, endOfName);
+      if (normalize(name).length > MAX_NAME) break;
+      const found = matches(name);
+      if (!found.length) continue;
+      candidates = found;
+      end = endOfName;
+    }
+  }
+  if (!candidates.length) throw new Error("No saved workflow matches that name. Use the workflow name or ID from Workflows.");
+  if (candidates.length > 1) throw new Error(`More than one workflow has that name. Use its ID: ${candidates.map((workflow) => workflow.id).join(", ")}.`);
+  const goal = text(input.slice(end), "Workflow prompt", MAX_WORKFLOW_GOAL, true);
+  return { workflow: candidates[0]!, goal };
+}
+
+export function addRunUsage(previous: RunUsage | undefined, next: RunUsage = {}): RunUsage {
+  const usage = { ...previous };
+  for (const field of ["inputTokens", "outputTokens", "cachedTokens", "costUsd"] as const) {
+    const value = next[field];
+    if (typeof value === "number" && Number.isFinite(value)) usage[field] = (usage[field] ?? 0) + value;
+  }
+  return usage;
+}
+
 export function boundedText(value: string, limit: number) {
   const trimmed = value.trim();
   return trimmed.length > limit ? `${trimmed.slice(0, Math.max(0, limit - 1)).trimEnd()}…` : trimmed;
@@ -180,8 +231,10 @@ export function workflowStepPrompt(
   step: WorkflowAgentStep,
   results: readonly WorkflowStepResult[] = [],
   feedback?: string,
+  goal?: string,
 ) {
   const sections = [step.prompt];
+  if (goal) sections.push(`User's workflow prompt:\n${goal}`);
   const feedbackText = feedback ? boundedText(feedback, Math.floor(MAX_HANDOFF / 3)) : "";
   if (feedbackText) sections.push(`Feedback from the review gate:\n${feedbackText}`);
   if (results.length) {

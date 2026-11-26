@@ -24,12 +24,14 @@ export async function applyFactoryReset(userData: string, clearBrowserData: () =
 
   await clearBrowserData();
   for (const name of STATE_FILES) await rm(join(root, name), { force: true });
-  const path = join(root, "connectors");
-  const entry = await lstat(path).catch((error: NodeJS.ErrnoException) => {
-    if (error.code !== "ENOENT") throw error;
-  });
-  // Node unlinks a symbolic link or junction without traversing its target.
-  if (entry?.isDirectory()) await rm(path, { recursive: true });
-  else if (entry) await rm(path);
+  for (const name of ["connectors", "workflows"]) {
+    const path = join(root, name);
+    const entry = await lstat(path).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+    });
+    // Node unlinks a symbolic link or junction without traversing its target.
+    if (entry?.isDirectory()) await rm(path, { recursive: true });
+    else if (entry) await rm(path);
+  }
   await rm(join(root, RESET_MARKER));
 }

@@ -5,7 +5,7 @@ import type {
 } from "../shared/contracts.js";
 import { asRecord } from "../shared/records.js";
 import {
-  MAX_GATE_FEEDBACK, cloneWorkflow, runSummary, workflowStepPrompt,
+  MAX_GATE_FEEDBACK, addRunUsage, cloneWorkflow, runSummary, workflowRequiresProject, workflowStepPrompt,
 } from "../shared/workflows.js";
 import type { WorkflowStepResult } from "../shared/workflows.js";
 
@@ -118,7 +118,7 @@ export function createWorkflowRunner(options: {
     try {
       runId = runs.start(run.folder, {
         providerId: step.providerId,
-        prompt: workflowStepPrompt(step, results, note),
+        prompt: workflowStepPrompt(step, results, note, run.goal),
         mode: step.mode,
         effort: step.effort,
         modelOverride: step.model,
@@ -154,6 +154,8 @@ export function createWorkflowRunner(options: {
     }
     runningSteps.delete(run.id);
     stepRun.finishedAt = new Date().toISOString();
+    stepRun.usage = addRunUsage(stepRun.usage, completed.usage);
+    run.usage = addRunUsage(run.usage, completed.usage);
     if (completed.worktree && completed.worktree.state !== "discarded") run.worktree = { ...completed.worktree };
 
     if (completed.status === "completed") {
@@ -346,8 +348,8 @@ export function createWorkflowRunner(options: {
         history.push(run);
       }
     },
-    start(folder: ProjectFolder | undefined, definition: WorkflowDefinition) {
-      if (!folder) throw new Error("Choose a project folder first.");
+    start(folder: ProjectFolder | undefined, definition: WorkflowDefinition, goal?: string) {
+      if (!folder && workflowRequiresProject(definition)) throw new Error("Choose a project for the Code steps in this workflow.");
       if (active()) throw new Error("Stop or finish the running workflow first.");
       const run: WorkflowRun = {
         id: `workflow-run-${randomUUID()}`,
@@ -355,6 +357,7 @@ export function createWorkflowRunner(options: {
         workflowName: definition.name,
         definition: cloneWorkflow(definition),
         folder,
+        ...(goal ? { goal } : {}),
         status: "running",
         startedAt: new Date().toISOString(),
         currentIndex: 0,
