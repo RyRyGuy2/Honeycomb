@@ -1015,6 +1015,11 @@ promptField.addEventListener("input", () => {
   actionError = "";
   renderControls();
 });
+promptField.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || event.isComposing || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) return;
+  event.preventDefault();
+  if (!event.repeat && !runButton.disabled) promptField.form?.requestSubmit(runButton);
+});
 providerField.addEventListener("change", () => {
   actionError = "";
   renderComposerProvider();
