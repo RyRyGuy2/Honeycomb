@@ -1,6 +1,7 @@
 import type {
   ChatPresetId, ChatProfile, CliProviderId, Connector, ConnectorStatus, ConversationContextSummary, DiffFile, HoneycombApi, ModelCatalog, ModelSelection, ProjectFolder, ProviderId, Run, RunStatus,
-  RunUsage, RunWorktree, SidebarMenuRequest, WorkspaceMode,
+  RunUsage, RunWorktree, SavedWorkflow, SidebarMenuRequest, WorkflowAgentStep, WorkflowDefinition, WorkflowGateStep, WorkflowRun, WorkflowRunStatus,
+  WorkflowStep, WorkflowStepStatus, WorkspaceMode,
 } from "../shared/contracts.js";
 import { configuredConnectors } from "../shared/connectors.js";
 import { compareTurns, conversationContext, conversationId, runMode } from "../shared/conversations.js";
@@ -8,6 +9,10 @@ import { supportsWorktreeEditing } from "../shared/editing.js";
 import { chatPresets, isChatPreset } from "../shared/chat-presets.js";
 import { copilotClipboardMarkdown, copilotCodeBlock } from "./copilot-clipboard.js";
 import type { FreebuffAttachment, FreebuffReview, WorktreeRecord } from "../shared/contracts.js";
+import {
+  DEFAULT_GATE_REVISIONS, DEFAULT_STEP_TIMEOUT_MS, MAX_GATE_FEEDBACK, MAX_GATE_REVISIONS, MAX_STEP_INPUTS, MAX_STEP_PROMPT,
+  MAX_STEP_TIMEOUT_MS, MAX_WORKFLOW_STEPS, MIN_STEP_TIMEOUT_MS, cloneWorkflow,
+} from "../shared/workflows.js";
 
 declare global {
   interface Window {
@@ -135,6 +140,22 @@ let connectors: Connector[] = [
 const runs = new Map<string, Run>();
 const openActivity = new Set<string>();
 
+type WorkflowView =
+  | { kind: "solo" }
+  | { kind: "detail"; id: string }
+  | { kind: "edit"; draft: WorkflowDefinition; existing: boolean }
+  | { kind: "run"; runId: string };
+
+let workflows: SavedWorkflow[] = [];
+const workflowRuns = new Map<string, WorkflowRun>();
+let workflowView: WorkflowView = { kind: "solo" };
+let workflowBusy = false;
+let workflowError = "";
+let workflowNote = "";
+let workflowConfirmDelete = false;
+let workflowRunRender: ReturnType<typeof setTimeout> | undefined;
+const gateFeedback = new Map<string, string>();
+
 interface ChatSummary {
   id: string;
   first: Run;
@@ -171,11 +192,14 @@ function showView(name: string) {
     void refreshModels(selectedConnectorId);
   }
   if (name === "chats") renderComposerProvider();
+  if (name === "workflows") renderWorkflows();
 }
 
 function chatHistory() {
   const chats = new Map<string, ChatSummary>();
   for (const run of runs.values()) {
+    // Workflow steps keep their own timeline in Workflows instead of appearing as chats.
+    if (run.workflowRunId) continue;
     const id = conversationId(run);
     const chat = chats.get(id);
     if (chat) {
@@ -231,6 +255,8 @@ function showError(error: unknown) {
 
 function renderControls() {
   const active = activeRun();
+  const workflowActive = Boolean(active?.workflowRunId);
+  const chatActive = workflowActive ? undefined : active;
   const busy = Boolean(active) || starting || switchingMode || worktreeBusy;
   const stop = get("stop-run", HTMLButtonElement);
   const providerId = chatProviderId();
@@ -265,8 +291,8 @@ function renderControls() {
   get("choose-folder", HTMLButtonElement).disabled = choosing || busy;
   get("new-task", HTMLButtonElement).disabled = choosing || busy;
   for (const button of modeButtons) button.disabled = choosing || busy;
-  stop.hidden = !active;
-  stop.disabled = active?.status === "stopping";
+  stop.hidden = !chatActive;
+  stop.disabled = chatActive?.status === "stopping";
   stop.textContent = stop.disabled ? "Stopping…" : "Stop run";
   runButton.disabled = needsProject || busy || choosing || webSigningIn || !promptField.value.trim() ||
     (!freebuff && (modelPending || provider?.status !== "detected" || (modelRequired && !chatModelField.value)));
@@ -285,7 +311,10 @@ function renderControls() {
 
   let message = actionError;
   if (!message && needsProject) message = "Choose a project above to start a Code chat.";
-  if (!message && active) message = `${active.providerName} is ${statusLabels[active.status].toLowerCase()}.`;
+  if (!message && active) {
+    message = workflowActive ? "A workflow step is running. Open Workflows to follow it."
+      : `${active.providerName} is ${statusLabels[active.status].toLowerCase()}.`;
+  }
   if (!message && freebuff) message = worktreeBusy ? "Working on the Freebuff handoff…" : "Paste and send the copied prompt in Freebuff.";
   if (!message && provider?.status === "checking") message = `Checking for ${provider.name}…`;
   if (!message && provider?.status !== "detected") message = `${provider?.name ?? "The connector"} is unavailable. See Connectors for details.`;
@@ -368,6 +397,7 @@ async function selectWorkspaceProject(
     choosing = false;
     renderChats();
     refreshLatestFreebuff();
+    void loadWorkflows();
   }
 }
 
@@ -603,6 +633,7 @@ async function worktreeAction(action: "keep" | "discard", id: string) {
   } finally {
     worktreeBusy = false;
     renderChats();
+    if (workflowView.kind === "run") renderWorkflowPanel();
   }
 }
 
@@ -1634,6 +1665,896 @@ async function refreshConnectors() {
   }
 }
 
+const workflowProviderOptions: ReadonlyArray<readonly [CliProviderId, string]> = [
+  ["codex", "Codex"], ["opencode", "OpenCode"], ["claude", "Claude Code"],
+];
+const workflowStatusLabels = {
+  running: "Running",
+  waiting: "Waiting for review",
+  stopping: "Stopping",
+  completed: "Completed",
+  failed: "Failed",
+  cancelled: "Stopped",
+  interrupted: "Interrupted",
+} satisfies Record<WorkflowRunStatus, string>;
+const workflowStepLabels = {
+  pending: "Pending",
+  running: "Running",
+  waiting: "Waiting for review",
+  completed: "Completed",
+  failed: "Failed",
+  cancelled: "Stopped",
+  skipped: "Skipped",
+} satisfies Record<WorkflowStepStatus, string>;
+
+let stepCounter = 0;
+
+function workflowErrorText(error: unknown) {
+  const message = error instanceof Error ? error.message : "Honeycomb could not complete the action.";
+  return message.replace(/^Error invoking remote method '[^']+': (Error: )?/, "");
+}
+
+function newStepId() {
+  stepCounter++;
+  return `step-${crypto.randomUUID().slice(0, 8)}-${stepCounter}`;
+}
+
+function newAgentStep(providerId: CliProviderId = "codex", index = 1): WorkflowAgentStep {
+  return {
+    id: newStepId(), kind: "agent", title: `Step ${index}`, providerId, model: "", effort: "", mode: "code",
+    edit: false, prompt: "", inputs: [], output: "", timeoutMs: DEFAULT_STEP_TIMEOUT_MS,
+  };
+}
+
+function newGateStep(steps: readonly WorkflowStep[]): WorkflowGateStep {
+  const target = [...steps].reverse().find((step) => step.kind === "agent");
+  return {
+    id: newStepId(), kind: "gate", title: "Review gate", feedbackStepId: target?.id ?? "",
+    maxRevisions: DEFAULT_GATE_REVISIONS,
+  };
+}
+
+function blankWorkflow(): WorkflowDefinition {
+  return {
+    id: `workflow-${crypto.randomUUID().slice(0, 8)}`, name: "New workflow", description: "",
+    steps: [newAgentStep("codex", 1)],
+  };
+}
+
+function workflowBadge(status: string, label: string) {
+  const badge = element("span", "workflow-status");
+  badge.dataset.status = status;
+  const dot = element("span", "status-dot");
+  dot.dataset.status = status;
+  badge.append(dot, document.createTextNode(label));
+  return badge;
+}
+
+function selectedWorkflowId() {
+  if (workflowView.kind === "detail") return workflowView.id;
+  if (workflowView.kind === "edit") return workflowView.draft.id;
+  return undefined;
+}
+
+function workflowById(id: string | undefined) {
+  return id ? workflows.find((entry) => entry.id === id) : undefined;
+}
+
+function currentWorkflow() {
+  return workflowById(selectedWorkflowId());
+}
+
+function workflowDraft() {
+  return workflowView.kind === "edit" ? workflowView.draft : undefined;
+}
+
+function currentWorkflowRun() {
+  return workflowView.kind === "run" ? workflowRuns.get(workflowView.runId) : undefined;
+}
+
+function rememberWorkflowRun(run: WorkflowRun) {
+  if ((workflowRuns.get(run.id)?.revision ?? -1) >= run.revision) return false;
+  workflowRuns.set(run.id, run);
+  return true;
+}
+
+async function loadWorkflowRuns() {
+  try {
+    for (const record of await api.listWorkflowRuns()) rememberWorkflowRun(record);
+  } catch {
+    // Workflow run history is optional; the timeline simply starts empty.
+  }
+}
+
+async function loadWorkflows() {
+  if (!folder) {
+    workflows = [];
+    renderWorkflowSidebar();
+    return;
+  }
+  try {
+    workflows = await api.listWorkflows();
+  } catch (error) {
+    workflowError = workflowErrorText(error);
+    workflows = [];
+  }
+  renderWorkflowSidebar();
+}
+
+async function refreshWorkflows() {
+  if (workflowBusy) return;
+  workflowBusy = true;
+  workflowError = "";
+  renderWorkflowSidebar();
+  try {
+    workflows = await api.listWorkflows();
+    await loadWorkflowRuns();
+    workflowNote = "Workflows reloaded from the project.";
+  } catch (error) {
+    workflowError = workflowErrorText(error);
+  } finally {
+    workflowBusy = false;
+    renderWorkflows();
+  }
+}
+
+function renderWorkflowSidebar() {
+  const list = get("workflow-list");
+  const selected = selectedWorkflowId();
+  const items = workflows.map((workflow) => {
+    const button = element("button", "sidebar-item workflow-workflow");
+    button.type = "button";
+    button.title = workflow.description || workflow.name;
+    if (workflow.id === selected) button.setAttribute("aria-current", "true");
+    const text = element("span", "connector-row");
+    text.append(
+      element("span", "workflow-item-name", workflow.name),
+      element("span", "connector-row-status", `${workflow.steps.length} ${workflow.steps.length === 1 ? "step" : "steps"}`),
+    );
+    button.append(element("span", "workflow-marker"), text);
+    button.addEventListener("click", () => openWorkflow(workflow.id));
+    return button;
+  });
+  list.replaceChildren(...(items.length ? items : [element("p", "workflow-empty", "No saved workflows yet.")]));
+  const solo = get("select-solo");
+  if (workflowView.kind === "solo") solo.setAttribute("aria-current", "true");
+  else solo.removeAttribute("aria-current");
+  get("refresh-workflows", HTMLButtonElement).disabled = workflowBusy;
+}
+
+function renderWorkflows() {
+  get("workflow-solo").hidden = workflowView.kind !== "solo";
+  get("workflow-panel").hidden = workflowView.kind === "solo";
+  renderWorkflowSidebar();
+  renderWorkflowPanel();
+}
+
+function renderWorkflowPanel() {
+  const panel = get("workflow-panel");
+  if (workflowView.kind === "solo") {
+    panel.replaceChildren();
+    return;
+  }
+  if (workflowView.kind === "edit") {
+    panel.replaceChildren(...workflowEditor(workflowView.draft, workflowView.existing));
+    return;
+  }
+  if (workflowView.kind === "run") {
+    const record = workflowRuns.get(workflowView.runId);
+    if (!record) {
+      panel.replaceChildren(element("p", "workflow-empty", "Loading this workflow run…"));
+      return;
+    }
+    panel.replaceChildren(...workflowRunView(record));
+    return;
+  }
+  const workflow = workflowById(workflowView.id);
+  if (!workflow) {
+    panel.replaceChildren(element("p", "workflow-empty", "This workflow is no longer saved."));
+    return;
+  }
+  panel.replaceChildren(...workflowDetail(workflow));
+}
+
+function openWorkflow(id: string) {
+  workflowView = { kind: "detail", id };
+  workflowError = "";
+  workflowNote = "";
+  workflowConfirmDelete = false;
+  renderWorkflows();
+}
+
+function workflowMessages() {
+  const nodes: HTMLElement[] = [];
+  if (workflowError) nodes.push(element("p", "workflow-error", workflowError));
+  if (workflowNote) nodes.push(element("p", "workflow-note", workflowNote));
+  return nodes;
+}
+
+function workflowDetail(workflow: SavedWorkflow) {
+  const header = element("div", "library-header");
+  const title = element("h1", "", workflow.name);
+  title.tabIndex = -1;
+  header.append(title, element("p", "", workflow.description || "A linear workflow of agent steps and review gates."));
+
+  const flow = element("ol", "workflow-steps");
+  for (const step of workflow.steps) {
+    const item = element("li", "workflow-step-row");
+    const meta = step.kind === "agent"
+      ? `${providerNames[step.providerId]} · ${step.model || "Connector default"}${step.edit ? " · edits in worktree" : ""}`
+      : `Review gate · feedback to ${workflow.steps.find((entry) => entry.id === step.feedbackStepId)?.title ?? "an earlier step"}`;
+    item.append(
+      element("span", "workflow-marker"),
+      element("span", "workflow-step-title", step.title),
+      element("span", "workflow-step-meta", meta),
+    );
+    flow.append(item);
+  }
+
+  const actions = element("div", "workflow-actions");
+  const run = element("button", "button button-primary", "Run workflow");
+  run.type = "button";
+  run.dataset.action = "run-workflow";
+  run.disabled = workflowBusy || !folder;
+  const edit = element("button", "button", "Edit");
+  edit.type = "button";
+  edit.dataset.action = "edit-workflow";
+  edit.disabled = workflowBusy;
+  const remove = element("button", "button", workflowConfirmDelete ? "Confirm delete" : "Delete");
+  remove.type = "button";
+  remove.dataset.action = "delete-workflow";
+  remove.disabled = workflowBusy;
+  actions.append(run, edit, remove);
+
+  const hint = element("p", "workflow-note", folder
+    ? `Runs in ${folder.name}. Definitions live in .honeycomb/workflows/.`
+    : "Choose a project in Chats to run this workflow.");
+  const history = workflowRunHistory(workflow.id);
+  return [header, flow, ...workflowMessages(), actions, hint, ...(history ? [history] : [])];
+}
+
+function workflowRunHistory(workflowId: string) {
+  const records = [...workflowRuns.values()]
+    .filter((run) => run.workflowId === workflowId)
+    .sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+  if (!records.length) return undefined;
+  const section = element("section", "workflow-history");
+  section.append(element("h2", "", "Runs"));
+  const list = element("div", "workflow-history-list");
+  for (const record of records.slice(0, 10)) {
+    const button = element("button", "sidebar-item workflow-history-run");
+    button.type = "button";
+    button.append(
+      workflowBadge(record.status, workflowStatusLabels[record.status]),
+      element("span", "workflow-step-meta",
+        `${new Date(record.startedAt).toLocaleString()} · step ${Math.min(record.currentIndex + 1, record.steps.length)} of ${record.steps.length}`),
+    );
+    button.addEventListener("click", () => {
+      workflowView = { kind: "run", runId: record.id };
+      workflowError = "";
+      workflowNote = "";
+      renderWorkflows();
+    });
+    list.append(button);
+  }
+  section.append(list);
+  return section;
+}
+
+function workflowField(labelText: string, control: HTMLElement, hint?: string) {
+  const field = element("label", "workflow-field");
+  field.append(element("span", "workflow-field-label", labelText), control);
+  if (hint) field.append(element("span", "workflow-field-hint", hint));
+  return field;
+}
+
+function workflowTextInput(value: string, options: { field: string; step?: string; max?: number; placeholder?: string }) {
+  const input = element("input", "workflow-input");
+  input.type = "text";
+  input.value = value;
+  input.autocomplete = "off";
+  input.dataset.field = options.field;
+  if (options.step) input.dataset.step = options.step;
+  if (options.max) input.maxLength = options.max;
+  if (options.placeholder) input.placeholder = options.placeholder;
+  return input;
+}
+
+function workflowNumberInput(value: number, field: string, step: string, min: number, max: number) {
+  const input = element("input", "workflow-input workflow-number");
+  input.type = "number";
+  input.min = String(min);
+  input.max = String(max);
+  input.step = "1";
+  input.value = String(Math.round(value));
+  input.dataset.field = field;
+  input.dataset.step = step;
+  return input;
+}
+
+function workflowSelect<T extends string>(
+  options: ReadonlyArray<readonly [T, string]>, value: T, field: string, step: string,
+) {
+  const select = element("select", "workflow-input");
+  select.dataset.field = field;
+  select.dataset.step = step;
+  for (const [optionValue, label] of options) {
+    const option = element("option", "", label);
+    option.value = optionValue;
+    select.append(option);
+  }
+  select.value = value;
+  return select;
+}
+
+function workflowTextArea(value: string, field: string, step: string, placeholder: string) {
+  const area = element("textarea", "workflow-input");
+  area.rows = 4;
+  area.maxLength = MAX_STEP_PROMPT;
+  area.placeholder = placeholder;
+  area.value = value;
+  area.dataset.field = field;
+  area.dataset.step = step;
+  return area;
+}
+
+function editorStepCard(step: WorkflowStep, index: number, steps: readonly WorkflowStep[]) {
+  const card = element("section", "workflow-step-editor");
+  card.dataset.stepId = step.id;
+  const head = element("div", "workflow-step-head");
+  head.append(element("span", "workflow-step-index", `${index + 1}`));
+  head.append(workflowTextInput(step.title, { field: "title", step: step.id, max: 80 }));
+  head.append(element("span", "workflow-step-kind", step.kind === "agent" ? "Agent" : "Review gate"));
+  const controls = element("div", "workflow-step-controls");
+  for (const [action, label, disabled] of [
+    ["step-up", "Move up", index === 0],
+    ["step-down", "Move down", index === steps.length - 1],
+    ["step-remove", "Remove", false],
+  ] as const) {
+    const button = element("button", "button button-small", label);
+    button.type = "button";
+    button.dataset.action = action;
+    button.dataset.step = step.id;
+    button.disabled = disabled;
+    button.setAttribute("aria-label", `${label} ${step.title}`);
+    controls.append(button);
+  }
+  head.append(controls);
+  card.append(head);
+
+  if (step.kind === "agent") {
+    const row = element("div", "workflow-field-row");
+    row.append(
+      workflowField("Connector", workflowSelect(workflowProviderOptions, step.providerId, "providerId", step.id)),
+      workflowField("Model", workflowTextInput(step.model, {
+        field: "model", step: step.id, max: 200, placeholder: "Connector default",
+      })),
+      workflowField("Thinking effort", workflowTextInput(step.effort, {
+        field: "effort", step: step.id, max: 40, placeholder: "Connector default",
+      })),
+    );
+    const row2 = element("div", "workflow-field-row");
+    row2.append(
+      workflowField("Mode", workflowSelect([["code", "Code"], ["chat", "Chat"]] as const, step.mode, "mode", step.id)),
+      workflowField("Time limit (seconds)",
+        workflowNumberInput(step.timeoutMs / 1000, "timeoutSeconds", step.id, MIN_STEP_TIMEOUT_MS / 1000, MAX_STEP_TIMEOUT_MS / 1000)),
+    );
+    card.append(row, row2);
+
+    const edit = element("label", "workflow-check");
+    const box = element("input");
+    box.type = "checkbox";
+    box.checked = step.edit;
+    box.dataset.field = "edit";
+    box.dataset.step = step.id;
+    box.disabled = step.mode !== "code" || !supportsWorktreeEditing(step.providerId);
+    edit.append(box, element("span", "", "Edit in the workflow worktree"));
+    card.append(edit);
+
+    const inputs = element("div", "workflow-inputs");
+    inputs.append(element("span", "workflow-field-label", "Inputs"));
+    const earlier = steps.slice(0, index).filter((entry) => entry.kind === "agent");
+    if (!earlier.length) inputs.append(element("span", "workflow-field-hint", "No earlier step results to use."));
+    for (const candidate of earlier) {
+      const label = element("label", "workflow-check");
+      const check = element("input");
+      check.type = "checkbox";
+      check.checked = step.inputs.includes(candidate.id);
+      check.disabled = !check.checked && step.inputs.length >= MAX_STEP_INPUTS;
+      check.dataset.field = "input";
+      check.dataset.step = step.id;
+      check.dataset.input = candidate.id;
+      label.append(check, element("span", "", candidate.title));
+      inputs.append(label);
+    }
+    card.append(inputs);
+
+    card.append(workflowField("Prompt", workflowTextArea(step.prompt, "prompt", step.id, "What should this step do?"),
+      `Up to ${MAX_STEP_PROMPT.toLocaleString("en-US")} characters. Earlier results and gate feedback are added automatically.`));
+    card.append(workflowField("Output name", workflowTextInput(step.output, {
+      field: "output", step: step.id, max: 60, placeholder: "Optional, for example plan",
+    })));
+  } else {
+    const row = element("div", "workflow-field-row");
+    const earlier = steps.slice(0, index).filter((entry) => entry.kind === "agent");
+    row.append(
+      workflowField("Feedback goes to", workflowSelect(
+        earlier.map((entry) => [entry.id, entry.title] as const), step.feedbackStepId, "feedbackStepId", step.id)),
+      workflowField("Allowed revisions", workflowNumberInput(step.maxRevisions, "maxRevisions", step.id, 0, MAX_GATE_REVISIONS)),
+    );
+    card.append(row, element("p", "workflow-field-hint",
+      "The run pauses here. Approving continues with the next step; rejecting sends your feedback back."));
+  }
+  return card;
+}
+
+function workflowEditor(draft: WorkflowDefinition, existing: boolean) {
+  const header = element("div", "library-header");
+  const title = element("h1", "", existing ? "Edit workflow" : "New workflow");
+  title.tabIndex = -1;
+  header.append(title, element("p", "", "Steps run in order. Review gates pause the run until you decide."));
+
+  const steps = draft.steps.map((step, index) => editorStepCard(step, index, draft.steps));
+  const actions = element("div", "workflow-actions");
+  const addAgent = element("button", "button", "Add agent step");
+  addAgent.type = "button";
+  addAgent.dataset.action = "add-agent";
+  addAgent.disabled = draft.steps.length >= MAX_WORKFLOW_STEPS;
+  const addGate = element("button", "button", "Add review gate");
+  addGate.type = "button";
+  addGate.dataset.action = "add-gate";
+  addGate.disabled = draft.steps.length >= MAX_WORKFLOW_STEPS || !draft.steps.some((step) => step.kind === "agent");
+  const save = element("button", "button button-primary", workflowBusy ? "Saving…" : "Save workflow");
+  save.type = "button";
+  save.dataset.action = "save-workflow";
+  save.disabled = workflowBusy;
+  const cancel = element("button", "button", "Cancel");
+  cancel.type = "button";
+  cancel.dataset.action = "cancel-edit";
+  cancel.disabled = workflowBusy;
+  actions.append(addAgent, addGate, save, cancel);
+
+  return [
+    header,
+    ...workflowMessages(),
+    workflowField("Name", workflowTextInput(draft.name, { field: "workflow-name", max: 80 })),
+    workflowField("Description", workflowTextInput(draft.description, { field: "workflow-description", max: 400 })),
+    ...steps,
+    actions,
+    element("p", "workflow-note", "Workflow files are data: no shell commands, environment variables, paths or secrets."),
+  ];
+}
+
+function sanitizeDraft(draft: WorkflowDefinition) {
+  const earlier = new Set<string>();
+  for (const [index, step] of draft.steps.entries()) {
+    if (step.kind === "agent") {
+      step.inputs = step.inputs.filter((id) => earlier.has(id));
+    } else if (!earlier.has(step.feedbackStepId)) {
+      const agents = draft.steps.slice(0, index).filter((entry) => entry.kind === "agent");
+      step.feedbackStepId = agents.at(-1)?.id ?? "";
+    }
+    earlier.add(step.id);
+  }
+}
+
+function onWorkflowInput(event: Event) {
+  const target = event.target;
+  if (!(target instanceof HTMLInputElement || target instanceof HTMLSelectElement || target instanceof HTMLTextAreaElement)) return;
+  const field = target.dataset.field;
+  if (!field) return;
+  if (field === "gate-feedback") {
+    const record = currentWorkflowRun();
+    if (record) gateFeedback.set(`${record.id}:${target.dataset.gateStep ?? ""}`, target.value);
+    return;
+  }
+  const draft = workflowDraft();
+  if (!draft) return;
+  if (field === "workflow-name") {
+    draft.name = target.value;
+    return;
+  }
+  if (field === "workflow-description") {
+    draft.description = target.value;
+    return;
+  }
+  const stepId = target.dataset.step;
+  if (!stepId) return;
+  const step = draft.steps.find((entry) => entry.id === stepId);
+  if (!step) return;
+  const value = target.value;
+  switch (field) {
+    case "title":
+      step.title = value;
+      return;
+    case "model":
+      if (step.kind === "agent") step.model = value;
+      return;
+    case "effort":
+      if (step.kind === "agent") step.effort = value;
+      return;
+    case "output":
+      if (step.kind === "agent") step.output = value;
+      return;
+    case "prompt":
+      if (step.kind === "agent") step.prompt = value;
+      return;
+    case "providerId": {
+      if (step.kind !== "agent") return;
+      step.providerId = value === "opencode" || value === "claude" ? value : "codex";
+      if (!supportsWorktreeEditing(step.providerId)) step.edit = false;
+      renderWorkflowPanel();
+      return;
+    }
+    case "mode": {
+      if (step.kind !== "agent") return;
+      step.mode = value === "chat" ? "chat" : "code";
+      if (step.mode === "chat") step.edit = false;
+      renderWorkflowPanel();
+      return;
+    }
+    case "edit":
+      if (step.kind === "agent" && target instanceof HTMLInputElement) {
+        step.edit = target.checked;
+        if (step.edit) step.mode = "code";
+      }
+      return;
+    case "input": {
+      if (step.kind !== "agent" || !(target instanceof HTMLInputElement)) return;
+      const inputId = target.dataset.input ?? "";
+      if (target.checked) {
+        if (!step.inputs.includes(inputId)) step.inputs.push(inputId);
+      } else {
+        step.inputs = step.inputs.filter((id) => id !== inputId);
+      }
+      return;
+    }
+    case "timeoutSeconds": {
+      if (step.kind !== "agent") return;
+      const seconds = Number.parseInt(value, 10);
+      if (!Number.isFinite(seconds)) return;
+      step.timeoutMs = Math.min(MAX_STEP_TIMEOUT_MS, Math.max(MIN_STEP_TIMEOUT_MS, seconds * 1000));
+      return;
+    }
+    case "feedbackStepId":
+      if (step.kind === "gate") step.feedbackStepId = value;
+      return;
+    case "maxRevisions": {
+      if (step.kind !== "gate") return;
+      const revisions = Number.parseInt(value, 10);
+      if (Number.isFinite(revisions)) step.maxRevisions = Math.min(MAX_GATE_REVISIONS, Math.max(0, revisions));
+      return;
+    }
+  }
+}
+
+async function onWorkflowClick(event: MouseEvent) {
+  const target = event.target instanceof Element ? event.target : null;
+  const button = target?.closest<HTMLButtonElement>("button[data-action]");
+  const action = button?.dataset.action;
+  if (!action) return;
+  const stepId = button.dataset.step;
+  const draft = workflowDraft();
+
+  switch (action) {
+    case "add-agent": {
+      if (!draft) return;
+      draft.steps.push(newAgentStep("codex", draft.steps.length + 1));
+      renderWorkflowPanel();
+      return;
+    }
+    case "add-gate": {
+      if (!draft) return;
+      const gate = newGateStep(draft.steps);
+      if (!gate.feedbackStepId) return;
+      draft.steps.push(gate);
+      renderWorkflowPanel();
+      return;
+    }
+    case "step-up":
+    case "step-down": {
+      if (!draft || !stepId) return;
+      const index = draft.steps.findIndex((step) => step.id === stepId);
+      const next = action === "step-up" ? index - 1 : index + 1;
+      if (index < 0 || next < 0 || next >= draft.steps.length) return;
+      const [moved] = draft.steps.splice(index, 1);
+      if (moved) draft.steps.splice(next, 0, moved);
+      sanitizeDraft(draft);
+      renderWorkflowPanel();
+      return;
+    }
+    case "step-remove": {
+      if (!draft || !stepId) return;
+      draft.steps = draft.steps.filter((step) => step.id !== stepId);
+      sanitizeDraft(draft);
+      renderWorkflowPanel();
+      return;
+    }
+    case "save-workflow":
+      void saveWorkflow();
+      return;
+    case "cancel-edit": {
+      const id = workflowDraft()?.id;
+      workflowConfirmDelete = false;
+      workflowError = "";
+      const saved = workflowById(id);
+      workflowView = saved ? { kind: "detail", id: saved.id } : { kind: "solo" };
+      renderWorkflows();
+      return;
+    }
+    case "edit-workflow": {
+      const workflow = currentWorkflow();
+      if (!workflow) return;
+      workflowView = { kind: "edit", draft: cloneWorkflow(workflow), existing: true };
+      workflowError = "";
+      workflowNote = "";
+      workflowConfirmDelete = false;
+      renderWorkflows();
+      return;
+    }
+    case "delete-workflow":
+      void removeWorkflow();
+      return;
+    case "run-workflow":
+      void startWorkflowRun();
+      return;
+    case "show-definition": {
+      const record = currentWorkflowRun();
+      if (!record) return;
+      openWorkflow(record.workflowId);
+      return;
+    }
+    case "stop-workflow":
+      void stopWorkflowRun();
+      return;
+    case "approve-gate":
+    case "reject-gate":
+      void decideGate(action === "approve-gate" ? "approved" : "rejected");
+      return;
+  }
+}
+
+async function saveWorkflow() {
+  const draft = workflowDraft();
+  if (!draft || workflowBusy) return;
+  workflowBusy = true;
+  workflowError = "";
+  workflowNote = "";
+  renderWorkflowPanel();
+  try {
+    const saved = await api.saveWorkflow(JSON.parse(JSON.stringify(draft)) as WorkflowDefinition);
+    workflows = [...workflows.filter((entry) => entry.id !== saved.id), saved]
+      .sort((a, b) => a.name.localeCompare(b.name));
+    workflowView = { kind: "detail", id: saved.id };
+    workflowNote = "Workflow saved in .honeycomb/workflows/.";
+  } catch (error) {
+    workflowError = workflowErrorText(error);
+  } finally {
+    workflowBusy = false;
+    renderWorkflows();
+  }
+}
+
+async function removeWorkflow() {
+  const workflow = currentWorkflow();
+  if (!workflow || workflowBusy) return;
+  if (!workflowConfirmDelete) {
+    workflowConfirmDelete = true;
+    workflowError = "";
+    renderWorkflowPanel();
+    return;
+  }
+  workflowBusy = true;
+  renderWorkflowPanel();
+  try {
+    await api.deleteWorkflow(workflow.id);
+    workflows = workflows.filter((entry) => entry.id !== workflow.id);
+    workflowView = { kind: "solo" };
+    workflowNote = `Deleted ${workflow.name}.`;
+  } catch (error) {
+    workflowError = workflowErrorText(error);
+  } finally {
+    workflowBusy = false;
+    workflowConfirmDelete = false;
+    renderWorkflows();
+  }
+}
+
+async function startWorkflowRun() {
+  const workflow = currentWorkflow();
+  if (!workflow || workflowBusy) return;
+  workflowBusy = true;
+  workflowError = "";
+  workflowNote = "";
+  renderWorkflowPanel();
+  try {
+    const runId = await api.startWorkflow(workflow.id);
+    await loadWorkflowRuns();
+    workflowView = { kind: "run", runId };
+  } catch (error) {
+    workflowError = workflowErrorText(error);
+  } finally {
+    workflowBusy = false;
+    renderWorkflows();
+  }
+}
+
+async function stopWorkflowRun() {
+  const record = currentWorkflowRun();
+  if (!record || workflowBusy) return;
+  workflowBusy = true;
+  workflowError = "";
+  renderWorkflowPanel();
+  try {
+    await api.stopWorkflow(record.id);
+  } catch (error) {
+    workflowError = workflowErrorText(error);
+  } finally {
+    workflowBusy = false;
+    renderWorkflows();
+  }
+}
+
+async function decideGate(decision: "approved" | "rejected") {
+  const record = currentWorkflowRun();
+  if (!record || workflowBusy) return;
+  const step = record.definition.steps[record.currentIndex];
+  const key = step ? `${record.id}:${step.id}` : "";
+  const feedbackValue = key ? gateFeedback.get(key)?.trim() ?? "" : "";
+  if (decision === "rejected" && !feedbackValue) {
+    workflowError = "Describe what should change before rejecting.";
+    renderWorkflowPanel();
+    return;
+  }
+  workflowBusy = true;
+  workflowError = "";
+  renderWorkflowPanel();
+  try {
+    await api.decideWorkflow({ runId: record.id, decision, ...(feedbackValue ? { feedback: feedbackValue } : {}) });
+    if (key) gateFeedback.delete(key);
+  } catch (error) {
+    workflowError = workflowErrorText(error);
+  } finally {
+    workflowBusy = false;
+    renderWorkflows();
+  }
+}
+
+function scheduleWorkflowRunRender(run: Run) {
+  if (!run.workflowRunId || workflowView.kind !== "run" || workflowRunRender) return;
+  const record = currentWorkflowRun();
+  if (!record || record.id !== run.workflowRunId) return;
+  workflowRunRender = setTimeout(() => {
+    workflowRunRender = undefined;
+    if (workflowView.kind === "run") renderWorkflowPanel();
+  }, 150);
+}
+
+function workflowWorktreeRun(record: WorkflowRun) {
+  for (let index = record.steps.length - 1; index >= 0; index--) {
+    const id = record.steps[index]?.runId;
+    const run = id ? runs.get(id) : undefined;
+    if (run?.worktree) return run;
+  }
+  return undefined;
+}
+
+function worktreeFallback(worktree: RunWorktree) {
+  const section = element("section", "diff-review");
+  const head = element("div", "diff-head");
+  head.append(element("h3", "", "Changes in worktree"), element("span", "diff-state", worktreeLabels[worktree.state]));
+  section.append(
+    head,
+    element("p", "diff-meta", `${worktree.branch} · from ${commitLabel(worktree.baseCommit)}`),
+    element("p", "diff-path", worktree.path),
+    element("p", "diff-empty", "The diff appears after the next editing step finishes."),
+  );
+  return section;
+}
+
+function gateControls(record: WorkflowRun, gate: WorkflowGateStep) {
+  const key = `${record.id}:${gate.id}`;
+  const section = element("div", "gate-controls");
+  section.append(element("h3", "", "Review decision"));
+  const target = record.definition.steps.find((entry) => entry.id === gate.feedbackStepId);
+  if (target) {
+    section.append(element("p", "workflow-field-hint", `Rejecting sends your feedback to “${target.title}” and re-runs it.`));
+  }
+  const area = element("textarea", "workflow-input");
+  area.rows = 3;
+  area.maxLength = MAX_GATE_FEEDBACK;
+  area.placeholder = "What should change before this gate passes?";
+  area.value = gateFeedback.get(key) ?? "";
+  area.dataset.field = "gate-feedback";
+  area.dataset.gateStep = gate.id;
+  const actions = element("div", "workflow-actions");
+  const approve = element("button", "button button-primary", "Approve and continue");
+  approve.type = "button";
+  approve.dataset.action = "approve-gate";
+  approve.disabled = workflowBusy;
+  const reject = element("button", "button", "Send feedback back");
+  reject.type = "button";
+  reject.dataset.action = "reject-gate";
+  reject.disabled = workflowBusy || !area.value.trim();
+  area.addEventListener("input", () => {
+    gateFeedback.set(key, area.value);
+    reject.disabled = workflowBusy || !area.value.trim();
+  });
+  actions.append(approve, reject);
+  section.append(area, actions);
+  return section;
+}
+
+function workflowRunView(record: WorkflowRun) {
+  const header = element("div", "library-header");
+  const title = element("h1", "", record.workflowName);
+  title.tabIndex = -1;
+  const status = element("p", "workflow-run-status");
+  status.append(
+    workflowBadge(record.status, workflowStatusLabels[record.status]),
+    element("span", "workflow-step-meta", `${record.folder.name} · started ${new Date(record.startedAt).toLocaleTimeString()}`),
+  );
+  header.append(title, status);
+
+  const actions = element("div", "workflow-actions");
+  const back = element("button", "button", "Workflow");
+  back.type = "button";
+  back.dataset.action = "show-definition";
+  actions.append(back);
+  const inProgress = record.status === "running" || record.status === "waiting" || record.status === "stopping";
+  if (inProgress) {
+    const stop = element("button", "button", record.status === "stopping" ? "Stopping…" : "Stop workflow");
+    stop.type = "button";
+    stop.dataset.action = "stop-workflow";
+    stop.disabled = workflowBusy || record.status === "stopping";
+    actions.append(stop);
+  }
+
+  const timeline = element("ol", "workflow-timeline");
+  for (const [index, step] of record.definition.steps.entries()) {
+    const stepRun = record.steps.find((entry) => entry.stepId === step.id);
+    const item = element("li", "workflow-timeline-step");
+    if (record.status !== "completed" && index === record.currentIndex) item.dataset.current = "true";
+    const head = element("div", "workflow-timeline-head");
+    head.append(
+      workflowBadge(stepRun?.status ?? "pending", workflowStepLabels[stepRun?.status ?? "pending"]),
+      element("h2", "", step.title),
+      element("span", "workflow-step-index", `${index + 1}`),
+    );
+    item.append(head);
+
+    const meta = step.kind === "agent"
+      ? `${providerNames[step.providerId]} · ${step.model || "Connector default"}${step.effort ? ` · ${effortLabel(step.effort)}` : ""} · ${step.edit ? "Edit in worktree" : step.mode === "chat" ? "Chat" : "Read-only"}`
+      : `Review gate · up to ${step.maxRevisions} ${step.maxRevisions === 1 ? "revision" : "revisions"}`;
+    item.append(element("p", "workflow-step-meta", meta));
+    if (stepRun?.detail) item.append(element("p", "workflow-note", stepRun.detail));
+
+    const run = stepRun?.runId ? runs.get(stepRun.runId) : undefined;
+    if (run) {
+      const last = run.events.map((event) => (event.type === "message" ? event.text : "")).filter(Boolean).at(-1);
+      if (last) item.append(agentReply(run.providerName, last));
+      item.append(runActivity(run));
+    }
+    if (record.status === "waiting" && stepRun?.status === "waiting" && step.kind === "gate") {
+      item.append(gateControls(record, step));
+    }
+    timeline.append(item);
+  }
+
+  const diffRun = workflowWorktreeRun(record);
+  const changes = diffRun ? runChanges(diffRun, true) : undefined;
+  const worktree = changes ?? (record.worktree ? worktreeFallback(record.worktree) : undefined);
+
+  return [
+    header,
+    ...workflowMessages(),
+    ...(record.error && !workflowError ? [element("p", "workflow-note", record.error)] : []),
+    actions,
+    timeline,
+    ...(worktree ? [worktree] : []),
+  ];
+}
+
 for (const button of viewButtons) {
   button.addEventListener("click", () => {
     if (button.dataset.view) showView(button.dataset.view);
@@ -1706,7 +2627,45 @@ get("remove-chat-connection").addEventListener("click", () => {
     renderChatProviders();
   }, "Removing connection…", "");
 });
-get("select-solo").addEventListener("click", () => get("solo-title").focus());
+get("new-workflow").addEventListener("click", () => {
+  workflowView = { kind: "edit", draft: blankWorkflow(), existing: false };
+  workflowError = "";
+  workflowNote = "";
+  workflowConfirmDelete = false;
+  renderWorkflows();
+  get("workflow-panel").querySelector<HTMLInputElement>('input[data-field="workflow-name"]')?.focus();
+});
+get("refresh-workflows").addEventListener("click", () => void refreshWorkflows());
+get("workflow-panel").addEventListener("click", (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  const worktreeButton = target?.closest<HTMLButtonElement>("button[data-worktree]");
+  if (worktreeButton) {
+    const id = worktreeButton.dataset.worktreeId;
+    const kind = worktreeButton.dataset.worktree;
+    if (id && (kind === "keep" || kind === "discard")) void worktreeAction(kind, id);
+    return;
+  }
+  void onWorkflowClick(event);
+});
+get("workflow-panel").addEventListener("input", onWorkflowInput);
+get("workflow-panel").addEventListener("change", onWorkflowInput);
+api.onWorkflowChanged((change) => {
+  if (change.type === "definitions") {
+    void loadWorkflows().then(() => {
+      if (workflowView.kind === "edit") renderWorkflowSidebar();
+      else renderWorkflows();
+    });
+    return;
+  }
+  if (!rememberWorkflowRun(change.run)) return;
+  if (workflowView.kind === "run" && workflowView.runId === change.run.id) renderWorkflowPanel();
+  renderWorkflowSidebar();
+});
+get("select-solo").addEventListener("click", () => {
+  workflowView = { kind: "solo" };
+  renderWorkflows();
+  get("solo-title").focus();
+});
 get("use-solo").addEventListener("click", () => {
   showView("chats");
   promptField.focus();
@@ -1866,6 +2825,7 @@ window.addEventListener("focus", refreshLatestFreebuff);
 api.onRunChanged((run) => {
   const previous = runs.get(run.id);
   if (!remember(run)) return;
+  scheduleWorkflowRunRender(run);
   if (previous?.status === run.status) {
     if (selectedChatId === conversationId(run)) {
       renderThread(chatTurns());
@@ -1887,4 +2847,6 @@ api.getState().then((state) => {
   for (const run of state.runs) remember(run);
   selectedChatId ??= recentChatId();
   renderWorkspaceMode();
+  void loadWorkflows();
+  void loadWorkflowRuns();
 }).catch(showError);

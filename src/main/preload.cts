@@ -1,6 +1,6 @@
 import electron = require("electron");
 import type { IpcRendererEvent } from "electron";
-import type { HoneycombApi, IpcCalls, Run } from "../shared/contracts.js" with { "resolution-mode": "import" };
+import type { HoneycombApi, IpcCalls, Run, WorkflowChange } from "../shared/contracts.js" with { "resolution-mode": "import" };
 
 const { contextBridge, ipcRenderer } = electron;
 
@@ -41,10 +41,22 @@ const api: HoneycombApi = {
   copyFreebuffExport: () => invoke("copy-freebuff-export"),
   discardWorktree: (worktreeId) => invoke("discard-worktree", worktreeId),
   showSidebarMenu: (request) => invoke("sidebar-menu", request),
+  listWorkflows: () => invoke("list-workflows"),
+  saveWorkflow: (workflow) => invoke("save-workflow", workflow),
+  deleteWorkflow: (id) => invoke("delete-workflow", id),
+  listWorkflowRuns: () => invoke("list-workflow-runs"),
+  startWorkflow: (id) => invoke("start-workflow", id),
+  stopWorkflow: (runId) => invoke("stop-workflow", runId),
+  decideWorkflow: (request) => invoke("workflow-decision", request),
   onRunChanged(callback) {
     const listener = (_event: IpcRendererEvent, run: Run) => callback(run);
     ipcRenderer.on("honeycomb:run-changed", listener);
     return () => ipcRenderer.removeListener("honeycomb:run-changed", listener);
+  },
+  onWorkflowChanged(callback) {
+    const listener = (_event: IpcRendererEvent, change: WorkflowChange) => callback(change);
+    ipcRenderer.on("honeycomb:workflow-changed", listener);
+    return () => ipcRenderer.removeListener("honeycomb:workflow-changed", listener);
   },
 };
 

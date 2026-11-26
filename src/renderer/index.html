@@ -57,12 +57,17 @@
 
       <aside id="workflows-sidebar" class="sidebar-panel" aria-labelledby="workflows-sidebar-title" hidden>
         <h2 id="workflows-sidebar-title" class="sidebar-title">Workflows</h2>
+        <button type="button" id="new-workflow" class="button sidebar-action">
+          <span aria-hidden="true">+</span> New workflow
+        </button>
         <div class="sidebar-list">
           <button type="button" id="select-solo" class="sidebar-item" aria-current="true" aria-controls="workflows">
             <span class="workflow-marker" aria-hidden="true"></span>
             Solo
           </button>
+          <div id="workflow-list" class="workflow-list"></div>
         </div>
+        <button type="button" id="refresh-workflows" class="button sidebar-action">Refresh</button>
       </aside>
 
       <aside id="connectors-sidebar" class="sidebar-panel" aria-labelledby="connectors-sidebar-title" hidden>
@@ -162,6 +167,7 @@
     </main>
 
     <main id="workflows" class="library" hidden>
+      <div id="workflow-solo">
       <div class="library-header">
         <h1 id="solo-title" tabindex="-1">Solo</h1>
         <p>One agent reviews the selected project and reports in Chats.</p>
@@ -178,6 +184,8 @@
           <button type="button" id="use-solo" class="button button-primary">Use Solo <span aria-hidden="true">→</span></button>
         </div>
       </section>
+      </div>
+      <div id="workflow-panel" class="workflow-panel" hidden></div>
     </main>
 
     <main id="connectors" class="library" hidden>

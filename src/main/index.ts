@@ -16,9 +16,12 @@ import { createChatProfileStore, parseChatModel } from "../service/chat-profiles
 import { runProcess } from "../service/process.js";
 import { FREEBUFF_EXPORT_PATTERN, findFreebuffTerminal, findFreebuffTranscript, openFreebuffTerminal, readFreebuffTranscript, readSavedFreebuffExchange } from "../service/freebuff.js";
 import { createRunService } from "../service/runs.js";
+import { createWorkflowRunner } from "../service/workflow-runner.js";
+import { createWorkflowRunStore } from "../service/workflow-runs.js";
+import { createWorkflowStore } from "../service/workflows.js";
 import { createWorkspaceStore } from "../service/workspace.js";
 import { createWorktreeManager } from "../service/worktree.js";
-import type { CliProviderId, FreebuffContext, IpcCalls, ProjectFolder, WorkspaceMode } from "../shared/contracts.js";
+import type { CliProviderId, FreebuffContext, IpcCalls, ProjectFolder, WorkflowChange, WorkspaceMode } from "../shared/contracts.js";
 import { supportsWorktreeEditing } from "../shared/editing.js";
 import { asRecord } from "../shared/records.js";
 
@@ -33,6 +36,7 @@ const RENDERER_ASSETS = new Map<string, readonly [filename: string, contentType:
   ["/shared/conversations.js", ["../shared/conversations.js", "text/javascript"]],
   ["/shared/chat-presets.js", ["../shared/chat-presets.js", "text/javascript"]],
   ["/shared/editing.js", ["../shared/editing.js", "text/javascript"]],
+  ["/shared/workflows.js", ["../shared/workflows.js", "text/javascript"]],
   ["/markdown-it.js", ["markdown-it.js", "text/javascript"]],
   ["/honeycomb-logo.svg", ["honeycomb-logo.svg", "image/svg+xml"]],
 ]);
@@ -81,8 +85,12 @@ const worktrees = createWorktreeManager(
   () => join(app.getPath("userData"), "worktrees"),
   () => { void workspace.save(workspaceState()); },
 );
+function send(channel: string, value: unknown) {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, value);
+}
+
 const runs = createRunService((run) => {
-  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("honeycomb:run-changed", run);
+  send("honeycomb:run-changed", run);
   if (run.revision === 1 || run.finishedAt) void workspace.save(workspaceState());
 }, (providerId) => ({
   executable: providerId === "opencode" ? getOpenCodePath() : undefined,
@@ -103,6 +111,16 @@ const runs = createRunService((run) => {
       streamHttpChat(connection, model, messages, AbortSignal.any([signal, AbortSignal.timeout(300_000)]), receive),
   };
 });
+const workflowStore = createWorkflowStore(() => folder?.path);
+const workflowRunStore = createWorkflowRunStore(() => join(app.getPath("userData"), "workflow-runs.json"));
+const workflowRuns = createWorkflowRunner({
+  runs,
+  save: (records) => { void workflowRunStore.save(records); },
+  publish: (run) => send("honeycomb:workflow-changed", { type: "run", run } satisfies WorkflowChange),
+});
+function notifyWorkflowDefinitions() {
+  send("honeycomb:workflow-changed", { type: "definitions" } satisfies WorkflowChange);
+}
 
 function workspaceState() {
   return { folder, projects, runs: runs.history(), mode, worktrees: worktrees.records() };
@@ -311,6 +329,7 @@ function registerHandlers() {
   handle("set-mode", async (value) => {
     if (value !== "code" && value !== "chat") throw new Error("Choose Code or Chat.");
     if (runs.hasActiveRun()) throw new Error("Finish or stop the response before changing modes.");
+    if (workflowRuns.hasActiveRun()) throw new Error("Finish or stop the workflow before changing modes.");
     mode = value;
     await workspace.save(workspaceState());
   });
@@ -342,6 +361,7 @@ function registerHandlers() {
     return project;
   });
   handle("start-run", async (request) => {
+    if (workflowRuns.hasActiveRun()) throw new Error("Finish or stop the running workflow first.");
     const payload = asRecord(request) ?? {};
     const workspaceMode = mode;
     const project = workspaceMode === "code" ? folder : undefined;
@@ -388,6 +408,10 @@ function registerHandlers() {
         (run.status === "running" || run.status === "stopping"))) {
       throw new Error("Stop the run before discarding its worktree.");
     }
+    if (workflowRuns.history().some((run) => run.worktree?.id === worktreeId &&
+        (run.status === "running" || run.status === "waiting" || run.status === "stopping"))) {
+      throw new Error("Finish or stop the workflow before discarding its worktree.");
+    }
     const { response } = await dialog.showMessageBox(window, {
       type: "warning",
       title: "Discard worktree",
@@ -403,6 +427,38 @@ function registerHandlers() {
     await workspace.save(workspaceState());
     return true;
   });
+  handle("list-workflows", () => workflowStore.list());
+  handle("save-workflow", async (value) => {
+    const saved = await workflowStore.save(value);
+    notifyWorkflowDefinitions();
+    return saved;
+  });
+  handle("delete-workflow", async (value) => {
+    const removed = await workflowStore.remove(value);
+    if (removed) notifyWorkflowDefinitions();
+    return removed;
+  });
+  handle("list-workflow-runs", () => workflowRuns.history());
+  handle("start-workflow", async (value) => {
+    if (typeof value !== "string") throw new Error("Invalid workflow.");
+    if (mode !== "code") throw new Error("Switch to Code to run a workflow.");
+    const project = folder;
+    if (!project) throw new Error("Choose a project folder first.");
+    if (runs.hasActiveRun()) throw new Error("Finish or stop the active run before starting a workflow.");
+    const workflow = (await workflowStore.list()).find((entry) => entry.id === value);
+    if (!workflow) throw new Error("This workflow is no longer saved.");
+    // Editing steps need Git up front so the first step does not fail halfway through the workflow.
+    if (workflow.steps.some((step) => step.kind === "agent" && step.edit)) {
+      await worktrees.inspect(project.path);
+      if (mode !== "code" || folder?.path !== project.path) throw new Error("The selected project changed. Try again.");
+    }
+    return workflowRuns.start(project, workflow);
+  });
+  handle("stop-workflow", async (value) => {
+    if (typeof value !== "string") throw new Error("Invalid workflow run.");
+    await workflowRuns.stop(value);
+  });
+  handle("workflow-decision", (value) => workflowRuns.decide(value));
   handle("sidebar-menu", async (request, window) => {
     const { target, id, x, y } = asRecord(request) ?? {};
     if ((target !== "project" && target !== "chat") || typeof id !== "string" ||
@@ -483,6 +539,8 @@ app.whenReady().then(async () => {
     folder = projects.find((project) => project.path === saved.folder?.path);
     worktrees.restore(saved.worktrees ?? []);
     runs.restore(saved.runs);
+    workflowRuns.restore(await workflowRunStore.load());
+    void workspace.save(workspaceState());
     for (const run of runs.history()) {
       const worktree = run.worktree;
       const record = worktree && worktrees.find(worktree.id);
@@ -513,11 +571,17 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", (event) => {
   if (quitting) {
-    if (runs.hasActiveRun() || connectorJobs.size) event.preventDefault();
+    if (runs.hasActiveRun() || workflowRuns.hasActiveRun() || connectorJobs.size) event.preventDefault();
     return;
   }
   event.preventDefault();
   quitting = true;
   connectorAbort.abort();
-  void Promise.allSettled([runs.shutdown(), ...connectorJobs]).then(() => workspace.flush()).then(() => app.quit());
+  void (async () => {
+    // Close waiting gates first, then let the run service finish the active provider process.
+    await workflowRuns.shutdown();
+    await Promise.allSettled([runs.shutdown(), ...connectorJobs]);
+    await Promise.allSettled([workspace.flush(), workflowRunStore.flush()]);
+    app.quit();
+  })();
 });

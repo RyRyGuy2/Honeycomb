@@ -148,6 +148,12 @@ export interface Run {
   edit?: boolean;
   worktree?: RunWorktree;
   diff?: RunDiff;
+  /** The workflow run that started this turn, when it came from a workflow step. */
+  workflowRunId?: string;
+  /** Per-run model chosen by a workflow step. Blank turns use the connector selection. */
+  modelOverride?: string;
+  /** Per-run time limit in milliseconds. */
+  timeoutMs?: number;
   prompt: string;
   startedAt: string;
   finishedAt?: string;
@@ -167,7 +173,106 @@ export interface StartRunRequest {
   model?: string;
   /** Request an edit in a dedicated Git worktree instead of a read-only review. */
   edit?: boolean;
+  /** Workflow steps run in an existing worktree instead of creating one. */
+  worktreeId?: string;
+  /** Set for turns started by a workflow step. */
+  workflowRunId?: string;
+  /** Model chosen by a workflow step. */
+  modelOverride?: string;
+  /** Time limit for this run. */
+  timeoutMs?: number;
 }
+
+export type WorkflowStepKind = "agent" | "gate";
+
+/** One connector run inside a workflow. */
+export interface WorkflowAgentStep {
+  id: string;
+  kind: "agent";
+  title: string;
+  providerId: CliProviderId;
+  /** Blank uses the connector's own model selection. */
+  model: string;
+  /** Blank uses the connector default thinking level. */
+  effort: string;
+  mode: WorkspaceMode;
+  /** Ask the connector to edit in the workflow worktree. */
+  edit: boolean;
+  prompt: string;
+  /** Earlier steps whose results are handed to this step. */
+  inputs: string[];
+  /** Names this step's result for later steps. */
+  output: string;
+  timeoutMs: number;
+}
+
+/** A human decision point between agent steps. */
+export interface WorkflowGateStep {
+  id: string;
+  kind: "gate";
+  title: string;
+  /** Earlier agent step that receives a rejection. */
+  feedbackStepId: string;
+  maxRevisions: number;
+}
+
+export type WorkflowStep = WorkflowAgentStep | WorkflowGateStep;
+
+/** A saved workflow. Definitions are data only and live in the project. */
+export interface WorkflowDefinition {
+  id: string;
+  name: string;
+  description: string;
+  steps: WorkflowStep[];
+}
+
+export interface SavedWorkflow extends WorkflowDefinition {
+  updatedAt: string;
+}
+
+export type WorkflowStepStatus = "pending" | "running" | "waiting" | "completed" | "failed" | "cancelled" | "skipped";
+export type FinishedWorkflowStatus = "completed" | "failed" | "cancelled" | "interrupted";
+export type WorkflowRunStatus = "running" | "waiting" | "stopping" | FinishedWorkflowStatus;
+
+export interface WorkflowStepRun {
+  stepId: string;
+  status: WorkflowStepStatus;
+  runId?: string;
+  startedAt?: string;
+  finishedAt?: string;
+  /** Rejections handled at this gate. */
+  revisions?: number;
+  detail?: string;
+}
+
+/** A workflow run record. Honeycomb keeps these in userData, never in the project. */
+export interface WorkflowRun {
+  id: string;
+  workflowId: string;
+  workflowName: string;
+  definition: WorkflowDefinition;
+  folder: ProjectFolder;
+  status: WorkflowRunStatus;
+  startedAt: string;
+  finishedAt?: string;
+  currentIndex: number;
+  steps: WorkflowStepRun[];
+  worktree?: RunWorktree;
+  error?: string;
+  revision: number;
+}
+
+export type WorkflowGateDecision = "approved" | "rejected";
+
+export interface WorkflowDecisionRequest {
+  runId: string;
+  decision: WorkflowGateDecision;
+  feedback?: string;
+}
+
+export type WorkflowChange =
+  | { type: "run"; run: WorkflowRun }
+  | { type: "definitions" };
 
 export interface AppState {
   folder: ProjectFolder | undefined;
@@ -212,6 +317,13 @@ export interface IpcCalls {
   "keep-worktree": (worktreeId: string) => boolean;
   "discard-worktree": (worktreeId: string) => boolean;
   "sidebar-menu": (request: SidebarMenuRequest) => boolean;
+  "list-workflows": () => SavedWorkflow[];
+  "save-workflow": (workflow: WorkflowDefinition) => SavedWorkflow;
+  "delete-workflow": (id: string) => boolean;
+  "list-workflow-runs": () => WorkflowRun[];
+  "start-workflow": (id: string) => string;
+  "stop-workflow": (runId: string) => void;
+  "workflow-decision": (request: WorkflowDecisionRequest) => void;
 }
 
 type Invoke<Channel extends keyof IpcCalls> =
@@ -247,5 +359,13 @@ export interface HoneycombApi {
   keepWorktree: Invoke<"keep-worktree">;
   discardWorktree: Invoke<"discard-worktree">;
   showSidebarMenu: Invoke<"sidebar-menu">;
+  listWorkflows: Invoke<"list-workflows">;
+  saveWorkflow: Invoke<"save-workflow">;
+  deleteWorkflow: Invoke<"delete-workflow">;
+  listWorkflowRuns: Invoke<"list-workflow-runs">;
+  startWorkflow: Invoke<"start-workflow">;
+  stopWorkflow: Invoke<"stop-workflow">;
+  decideWorkflow: Invoke<"workflow-decision">;
   onRunChanged(callback: (run: Run) => void): () => void;
+  onWorkflowChanged(callback: (change: WorkflowChange) => void): () => void;
 }
