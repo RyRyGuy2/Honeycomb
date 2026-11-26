@@ -563,7 +563,7 @@ function runActivity(run: Run) {
   return details;
 }
 
-get("feed").addEventListener("click", (event) => {
+get("thread").addEventListener("click", (event) => {
   const target = event.target instanceof Element ? event.target : null;
   const link = target?.closest<HTMLAnchorElement>("a[href]");
   if (link) {
@@ -802,7 +802,9 @@ function freebuffCard(record: WorktreeRecord, latest: boolean) {
   if (savedReply) {
     const reply = element("details", "freebuff-reply");
     reply.open = latest;
-    reply.append(element("summary", "", "Latest Freebuff reply"), element("p", "", savedReply));
+    const body = element("div", "markdown freebuff-markdown");
+    body.innerHTML = markdown.render(savedReply);
+    reply.append(element("summary", "", "Latest Freebuff reply"), body);
     card.append(reply);
   }
   const options = element("details", "freebuff-options");
