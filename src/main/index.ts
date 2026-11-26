@@ -14,7 +14,7 @@ import { opencode, parseOpenCodeModel } from "../providers/opencode.js";
 import { COPILOT_ID, COPILOT_NAME, createWindowsCopilot } from "../providers/windows-copilot.js";
 import { createChatProfileStore, parseChatModel } from "../service/chat-profiles.js";
 import { runProcess } from "../service/process.js";
-import { FREEBUFF_EXPORT_PATTERN, findFreebuffTerminal, findFreebuffTranscript, openFreebuffTerminal, readFreebuffTranscript, readSavedFreebuffExchange } from "../service/freebuff.js";
+import { FREEBUFF_EXPORT_PATTERN, findFreebuffTerminal, findFreebuffTranscript, openFreebuffTerminal, readFreebuffTranscript, readSavedFreebuffExchange, readSavedFreebuffExchanges } from "../service/freebuff.js";
 import { createRunService } from "../service/runs.js";
 import { createWorkflowRunner } from "../service/workflow-runner.js";
 import { createWorkflowRunStore } from "../service/workflow-runs.js";
@@ -260,16 +260,16 @@ function registerHandlers() {
   handle("review-freebuff", async (id) => {
     const record = typeof id === "string" ? worktrees.find(id) : undefined;
     if (!record?.freebuffProject || !(await worktrees.exists(record))) return { available: false };
-    const [diff, transcript, savedExchange] = await Promise.all([
+    const [diff, transcript, savedExchanges] = await Promise.all([
       worktrees.diff(record, (path, status) => status !== "added" || !FREEBUFF_EXPORT_PATTERN.test(path)),
       findFreebuffTranscript(record.path),
-      readSavedFreebuffExchange(record.path),
+      readSavedFreebuffExchanges(record.path),
     ]);
     return {
       available: true,
       diff,
       transcriptReady: Boolean(transcript),
-      savedExchange,
+      savedExchanges,
     };
   });
   handle("copy-freebuff-export", () => {

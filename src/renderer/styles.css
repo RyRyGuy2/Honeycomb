@@ -562,7 +562,7 @@ main { grid-column: 3; }
 .feed { width: min(100%, 740px); display: grid; align-content: start; gap: 12px; margin: 0 auto; }
 .feed-entry { min-width: 0; padding: 14px 16px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); }
 .feed-entry.user { background: var(--accent-wash); border-color: var(--accent-border); }
-.feed-entry h2 { margin-bottom: 6px; font-size: 12px; font-weight: 680; color: var(--muted); }
+.feed-entry h2, .freebuff-message h2 { margin-bottom: 6px; font-size: 12px; font-weight: 680; color: var(--muted); }
 .feed-entry p { line-height: 1.56; overflow-wrap: anywhere; white-space: pre-wrap; }
 .agent-reply { min-width: 0; padding: 8px 2px; line-height: 1.62; overflow-wrap: anywhere; }
 .markdown > :first-child { margin-top: 0; }
@@ -625,15 +625,6 @@ main { grid-column: 3; }
 .diff-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 11px; }
 .freebuff-options, .freebuff-archive { margin-top: 10px; color: var(--muted); font-size: 12px; }
 .freebuff-options > summary, .freebuff-archive > summary { cursor: pointer; width: fit-content; }
-.freebuff-reply { margin-top: 12px; }
-.freebuff-reply > summary { cursor: pointer; width: fit-content; font-weight: 600; }
-.freebuff-reply > .freebuff-markdown {
-  margin-top: 6px;
-  max-height: 280px;
-  overflow: auto;
-  overflow-wrap: anywhere;
-  line-height: 1.55;
-}
 .freebuff-archive > .diff-review { margin-top: 8px; }
 #feed:not([hidden]) + #freebuff-handoffs { margin-top: 16px; }
 

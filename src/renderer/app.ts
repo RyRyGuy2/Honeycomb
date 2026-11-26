@@ -8,7 +8,7 @@ import { compareTurns, conversationContext, conversationId, runMode } from "../s
 import { supportsWorktreeEditing } from "../shared/editing.js";
 import { chatPresets, isChatPreset } from "../shared/chat-presets.js";
 import { copilotClipboardMarkdown, copilotCodeBlock } from "./copilot-clipboard.js";
-import type { FreebuffAttachment, FreebuffReview, WorktreeRecord } from "../shared/contracts.js";
+import type { FreebuffAttachment, FreebuffContext, FreebuffReview, WorktreeRecord } from "../shared/contracts.js";
 import {
   DEFAULT_GATE_REVISIONS, DEFAULT_STEP_TIMEOUT_MS, MAX_GATE_FEEDBACK, MAX_GATE_REVISIONS, MAX_STEP_INPUTS, MAX_STEP_PROMPT,
   MAX_STEP_TIMEOUT_MS, MAX_WORKFLOW_STEPS, MIN_STEP_TIMEOUT_MS, cloneWorkflow,
@@ -37,6 +37,7 @@ const freebuffErrors = new Map<string, string>();
 const freebuffNotices = new Map<string, string>();
 const freebuffChecking = new Set<string>();
 let olderFreebuffOpen = false;
+let viewedFreebuffId: string | undefined;
 const markdown = window.markdownit({ html: false });
 markdown.disable("image");
 const viewButtons = document.querySelectorAll<HTMLButtonElement>("[data-view]");
@@ -386,6 +387,7 @@ async function selectWorkspaceProject(
     const keepChat = register && !startNew && folder?.path === selection.path;
     if (folder?.path !== selection.path || (startNew && selectedChatId)) editAccess.delete("new:code");
     if (folder?.path !== selection.path || startNew) freebuffAttachments.delete("new:code");
+    if (!keepChat) viewedFreebuffId = undefined;
     folder = selection;
     if (!keepChat) selectedChatId = startNew ? undefined : chatId && chatTurns(chatId).length ? chatId : projectChats()[0]?.id;
     newProjectPath = selectedChatId ? undefined : selection.path;
@@ -736,7 +738,7 @@ async function reviewFreebuffWorktree(id: string) {
   }
 }
 
-type FreebuffAction = "send" | "fresh" | "open" | "replace" | "review" | "export" | "import" | "use-reply" | "keep" | "discard";
+type FreebuffAction = "send" | "fresh" | "open" | "replace" | "view" | "review" | "export" | "import" | "use-reply" | "keep" | "discard";
 
 async function freebuffAction(action: FreebuffAction, id?: string) {
   if (worktreeBusy) return;
@@ -752,7 +754,12 @@ async function freebuffAction(action: FreebuffAction, id?: string) {
       freebuffNotices.set(record.id, prompt.trim() ? "Prompt copied. Paste it into Freebuff and press Enter." : "Freebuff opened in Windows Terminal.");
       if (targetDraft && targetDraft === draftKey && targetProject === folder?.path && mode === "code") {
         freebuffAttachments.set(targetDraft, { worktreeId: record.id, source: "saved" });
+        if (!selectedChatId) viewedFreebuffId = record.id;
       }
+    } else if (id && action === "view") {
+      selectedChatId = undefined;
+      newProjectPath = folder?.path;
+      viewedFreebuffId = id;
     } else if (id && action === "review") await reviewFreebuffWorktree(id);
     else if (id && action === "export") {
       await api.copyFreebuffExport();
@@ -760,7 +767,7 @@ async function freebuffAction(action: FreebuffAction, id?: string) {
     }
     else if (id && (action === "import" || action === "use-reply")) {
       const review = freebuffReviews.get(id);
-      if (!review?.available || !(action === "import" ? review.transcriptReady : review.savedExchange)) {
+      if (!review?.available || !(action === "import" ? review.transcriptReady : review.savedExchanges.length)) {
         throw new Error("Refresh the worktree after Freebuff finishes.");
       }
       if (!targetDraft || targetDraft !== draftKey || targetProject !== folder?.path || mode !== "code") {
@@ -779,6 +786,7 @@ async function freebuffAction(action: FreebuffAction, id?: string) {
     }
     else if (id && action === "keep") await api.keepWorktree(id);
     else if (id && await api.discardWorktree(id)) {
+      if (viewedFreebuffId === id) viewedFreebuffId = undefined;
       freebuffReviews.delete(id);
       freebuffErrors.delete(id);
       freebuffNotices.delete(id);
@@ -816,8 +824,16 @@ function pendingFreebuff() {
 }
 
 function latestActiveFreebuff() {
-  const [latest] = projectFreebuffWorktrees();
+  const records = projectFreebuffWorktrees();
+  const latest = records.find((record) => record.id === viewedFreebuffId) ?? records[0];
   return latest?.state === "active" && freebuffReviews.get(latest.id)?.available !== false ? latest : undefined;
+}
+
+function freebuffChatWorktree() {
+  if (selectedChatId) return;
+  const records = projectFreebuffWorktrees();
+  const id = viewedFreebuffId ?? pendingFreebuff()?.worktreeId;
+  return records.find((record) => record.id === id) ?? (providerField.value === "freebuff" ? records[0] : undefined);
 }
 
 function freebuffCard(record: WorktreeRecord, latest: boolean) {
@@ -841,15 +857,7 @@ function freebuffCard(record: WorktreeRecord, latest: boolean) {
     status.setAttribute("role", "status");
     card.append(status);
   }
-  const savedReply = review?.available ? review.savedExchange?.reply : undefined;
-  if (savedReply) {
-    const reply = element("details", "freebuff-reply");
-    reply.open = latest;
-    const body = element("div", "markdown freebuff-markdown");
-    body.innerHTML = markdown.render(savedReply);
-    reply.append(element("summary", "", "Latest Freebuff reply"), body);
-    card.append(reply);
-  }
+  const hasReply = review?.available && review.savedExchanges.length > 0;
   const options = element("details", "freebuff-options");
   options.append(element("summary", "", "Worktree options"));
   for (const meta of card.querySelectorAll(".diff-meta, .diff-path")) options.append(meta);
@@ -866,7 +874,8 @@ function freebuffCard(record: WorktreeRecord, latest: boolean) {
     addAction(actions, "replace", "Create replacement");
   } else {
     addAction(actions, "review", "Refresh changes");
-    if (savedReply) {
+    if (hasReply) {
+      if (freebuffChatWorktree()?.id !== record.id) addAction(actions, "view", "View chat");
       addAction(actions, "use-reply", "Use reply");
       if (review?.available && review.transcriptReady) addAction(extras, "import", "Use exported transcript");
       addAction(extras, "export", "Copy export command");
@@ -931,9 +940,24 @@ function renderThread(turns: readonly Run[]) {
   const thread = get("thread");
   const feed = get("feed");
   const atBottom = thread.scrollHeight - thread.scrollTop - thread.clientHeight < 55;
-  get("welcome").hidden = Boolean(turns.length);
-  feed.hidden = !turns.length;
-  const switched = lastThreadId !== selectedChatId;
+  const freebuff = freebuffChatWorktree();
+  const review = freebuff && freebuffReviews.get(freebuff.id);
+  const exchanges = review?.available ? review.savedExchanges : [];
+  const threadId = freebuff ? `freebuff:${freebuff.id}` : selectedChatId;
+  const switched = lastThreadId !== threadId;
+  lastThreadId = threadId;
+  get("welcome").hidden = Boolean(turns.length || exchanges.length);
+  feed.hidden = !turns.length && !exchanges.length;
+  if (exchanges.length) {
+    feed.replaceChildren(...exchanges.map((exchange, index) => {
+      const turn = element("section", "conversation-turn");
+      turn.setAttribute("aria-label", `Freebuff turn ${index + 1}`);
+      turn.append(...freebuffMessages(exchange));
+      return turn;
+    }));
+    if (atBottom || switched) thread.scrollTop = thread.scrollHeight;
+    return;
+  }
   if (switched || !turns.length) feed.replaceChildren();
 
   for (const [index, run] of turns.entries()) {
@@ -943,6 +967,7 @@ function renderThread(turns: readonly Run[]) {
     turn.setAttribute("aria-label", `Turn ${index + 1}`);
     turn.dataset.runId = run.id;
     turn.dataset.revision = String(run.revision);
+    if (run.freebuffContext) turn.append(...freebuffMessages(run.freebuffContext));
     turn.append(feedEntry("You", run.prompt, "user"));
     for (const event of run.events) {
       if (event.type === "message") turn.append(agentReply(run.providerName, event.text));
@@ -962,7 +987,14 @@ function renderThread(turns: readonly Run[]) {
     }
   }
   if (atBottom || switched) thread.scrollTop = thread.scrollHeight;
-  lastThreadId = selectedChatId;
+}
+
+function freebuffMessages(context: FreebuffContext) {
+  const transcript = "transcript" in context;
+  const reply = agentReply(transcript ? "Freebuff transcript" : "Freebuff", transcript ? context.transcript : context.reply);
+  reply.classList.add("freebuff-message");
+  reply.querySelector("h2")!.classList.remove("visually-hidden");
+  return !transcript && context.prompt ? [feedEntry("You · Freebuff", context.prompt, "user"), reply] : [reply];
 }
 
 function copilotReplyForm(run: Run) {
@@ -1111,7 +1143,7 @@ function renderChats() {
   const continueChat = Boolean(first);
   promptField.placeholder = continueChat ? "Ask a follow-up…" : mode === "chat" ? "Ask a question…" : "Ask about your project…";
   const title = get("chat-title");
-  title.textContent = first?.prompt.replace(/\s+/g, " ") ?? (mode === "chat" ? "New chat" : "New task");
+  title.textContent = first?.prompt.replace(/\s+/g, " ") ?? (freebuffChatWorktree() ? "Freebuff chat" : mode === "chat" ? "New chat" : "New task");
   title.title = first ? title.textContent : "";
   renderSidebar();
   renderThread(turns);
@@ -1123,6 +1155,7 @@ function renderChats() {
 
 function selectChat(id: string | undefined) {
   if (starting) return;
+  viewedFreebuffId = undefined;
   selectedChatId = id;
   renderChats();
 }
@@ -1147,6 +1180,7 @@ async function switchMode(next: WorkspaceMode) {
   try {
     await api.setMode(next);
     lastChatByMode[mode] = selectedChatId;
+    viewedFreebuffId = undefined;
     mode = next;
     selectedChatId = Object.hasOwn(lastChatByMode, mode) ? lastChatByMode[mode] : recentChatId();
     actionError = "";
@@ -2745,7 +2779,7 @@ providerField.addEventListener("change", () => {
     if (worktree) freebuffAttachments.set(draftKey, { worktreeId: worktree.id, source: "saved" });
   }
   if (draftKey && !supportsWorktreeEditing(chatProviderId())) editAccess.delete(draftKey);
-  renderFreebuff();
+  renderChats();
   renderComposerProvider();
 });
 get("remove-freebuff-context").addEventListener("click", () => {
@@ -2813,11 +2847,10 @@ get("composer").addEventListener("submit", (event) => {
 
 function refreshLatestFreebuff() {
   if (worktreeBusy || mode !== "code" || !folder) return;
-  const [latest] = projectFreebuffWorktrees();
+  const latest = freebuffChatWorktree() ?? projectFreebuffWorktrees()[0];
   if (!latest) return;
   void reviewFreebuffWorktree(latest.id).then(() => {
-    renderFreebuff();
-    renderControls();
+    renderChats();
   });
 }
 window.addEventListener("focus", refreshLatestFreebuff);

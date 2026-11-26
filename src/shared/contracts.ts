@@ -111,7 +111,7 @@ export interface FreebuffAttachment {
 
 export type FreebuffReview =
   | { available: false }
-  | { available: true; diff: RunDiff; transcriptReady: boolean; savedExchange?: FreebuffExchange };
+  | { available: true; diff: RunDiff; transcriptReady: boolean; savedExchanges: FreebuffExchange[] };
 
 export type RunEventData =
   | { type: "started" | "stopping" | "message" | "tool_call" | "tool_result" | "notice" | "error"; text: string }

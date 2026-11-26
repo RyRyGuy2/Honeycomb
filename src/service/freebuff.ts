@@ -10,18 +10,26 @@ export const FREEBUFF_EXPORT_PATTERN = /^freebuff-result(?:-\d{13})?\.md$/;
 const FREEBUFF_CHAT_FILE_LIMIT = 16 * 1024 * 1024;
 const FREEBUFF_REPLY_LIMIT = 12_000;
 const FREEBUFF_PROMPT_LIMIT = 4_000;
+const FREEBUFF_EXCHANGE_LIMIT = 20;
 
 export async function readSavedFreebuffExchange(
   worktreePath: string,
-  configDir = process.env.FREEBUFF_CONFIG_DIR || join(homedir(), ".config", "manicode"),
+  configDir?: string,
 ): Promise<FreebuffExchange | undefined> {
-  if (!isAbsolute(configDir)) return;
+  return (await readSavedFreebuffExchanges(worktreePath, configDir)).at(-1);
+}
+
+export async function readSavedFreebuffExchanges(
+  worktreePath: string,
+  configDir = process.env.FREEBUFF_CONFIG_DIR || join(homedir(), ".config", "manicode"),
+): Promise<FreebuffExchange[]> {
+  if (!isAbsolute(configDir)) return [];
   try {
     // Freebuff stores chat history under the basename of the project folder.
     const config = await realpath(configDir);
     const expected = join(config, "projects", basename(worktreePath), "chats");
     const chats = await realpath(expected);
-    if (relative(expected, chats)) return;
+    if (relative(expected, chats)) return [];
     let latest: { path: string; modified: number } | undefined;
     for (const entry of await readdir(chats, { withFileTypes: true })) {
       if (!entry.isDirectory() || !/^\d{4}-\d{2}-\d{2}T[\d.-]+Z$/.test(entry.name)) continue;
@@ -31,18 +39,19 @@ export async function readSavedFreebuffExchange(
         latest = { path, modified: info.mtimeMs };
       }
     }
-    if (!latest) return;
+    if (!latest) return [];
     const path = await realpath(latest.path);
-    if (!isInside(chats, path)) return;
+    if (!isInside(chats, path)) return [];
     const file = await open(path, "r");
     try {
       const { size } = await file.stat();
-      if (size > FREEBUFF_CHAT_FILE_LIMIT) return;
+      if (size > FREEBUFF_CHAT_FILE_LIMIT) return [];
       const buffer = Buffer.alloc(size);
       const { bytesRead } = await file.read(buffer);
       const messages: unknown = JSON.parse(buffer.subarray(0, bytesRead).toString("utf8"));
-      if (!Array.isArray(messages)) return;
-      for (let index = messages.length - 1; index >= 0; index--) {
+      if (!Array.isArray(messages)) return [];
+      const exchanges: FreebuffExchange[] = [];
+      for (let index = messages.length - 1; index >= 0 && exchanges.length < FREEBUFF_EXCHANGE_LIMIT; index--) {
         const message = asRecord(messages[index]);
         if (message?.variant !== "ai" || message.isComplete !== true) continue;
         const text = Array.isArray(message.blocks) && message.blocks.length
@@ -53,20 +62,19 @@ export async function readSavedFreebuffExchange(
           : typeof message.content === "string" ? message.content : "";
         const reply = historyExcerpt(text, FREEBUFF_REPLY_LIMIT);
         if (!reply) continue;
-        for (let previous = index - 1; previous >= 0; previous--) {
-          const user = asRecord(messages[previous]);
-          if (user?.variant === "user") {
-            const prompt = typeof user.content === "string" ? historyExcerpt(user.content, FREEBUFF_PROMPT_LIMIT) : "";
-            return { prompt: prompt || undefined, reply };
-          }
-        }
-        return { reply };
+        // Keep only the final completed public answer between two user messages.
+        while (index > 0 && asRecord(messages[index - 1])?.variant !== "user") index--;
+        const user = asRecord(messages[index - 1]);
+        const prompt = typeof user?.content === "string" ? historyExcerpt(user.content, FREEBUFF_PROMPT_LIMIT) : "";
+        exchanges.push(prompt ? { prompt, reply } : { reply });
       }
+      return exchanges.reverse();
     } finally {
       await file.close();
     }
   } catch {
     // History can be missing, mid-write, or in a format from another CLI version.
+    return [];
   }
 }
 

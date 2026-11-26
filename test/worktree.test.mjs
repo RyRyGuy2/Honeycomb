@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { createRunService } from "../dist/service/runs.js";
 import { createWorktreeManager } from "../dist/service/worktree.js";
-import { FREEBUFF_EXPORT_PATTERN, readFreebuffTranscript, readSavedFreebuffExchange } from "../dist/service/freebuff.js";
+import { FREEBUFF_EXPORT_PATTERN, readFreebuffTranscript, readSavedFreebuffExchange, readSavedFreebuffExchanges } from "../dist/service/freebuff.js";
 import { supportsWorktreeEditing } from "../dist/shared/editing.js";
 
 // Keep the tests independent of the developer's Git identity and global configuration.
@@ -116,7 +116,7 @@ test("a restored Freebuff handoff reviews commits and new files without staging 
   assert.equal(await exists(record.path), false);
 });
 
-test("saved Freebuff exchanges pair the latest completed public reply with its own prompt", async (t) => {
+test("Freebuff chat reads each completed public reply paired with its own prompt", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "honeycomb-freebuff-history-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const worktree = join(root, "repo-abc123");
@@ -133,7 +133,10 @@ test("saved Freebuff exchanges pair the latest completed public reply with its o
   await save("repo-abc123", "2026-11-25T16-05-26.184Z", [complete("Older chat")], 10);
   await save("another-project", "2026-11-25T16-05-28.184Z", [complete("Other worktree")], 30);
   const latest = await save("repo-abc123", "2026-11-25T16-05-29.184Z", [
+    { variant: "user", content: "Earlier question" },
+    complete("Earlier response"),
     { variant: "user", content: "Original question" },
+    complete("Intermediate note"),
     { variant: "ai", isComplete: true, blocks: [
       { type: "text", textType: "reasoning", content: "Internal reasoning" },
       { type: "tool", output: "Tool logs" },
@@ -143,6 +146,10 @@ test("saved Freebuff exchanges pair the latest completed public reply with its o
     { variant: "ai", isComplete: false, content: "Still streaming" },
   ], 20);
   await mkdir(join(config, "projects", "repo-abc123", "chats", "2026-11-25T16-05-32.184Z"));
+  assert.deepEqual(await readSavedFreebuffExchanges(worktree, config), [
+    { prompt: "Earlier question", reply: "Earlier response" },
+    { prompt: "Original question", reply: "Final response" },
+  ]);
   assert.deepEqual(await readSavedFreebuffExchange(worktree, config), { prompt: "Original question", reply: "Final response" });
   assert.equal(await readSavedFreebuffExchange(join(root, "unknown"), config), undefined);
   await writeFile(latest, "[broken");
