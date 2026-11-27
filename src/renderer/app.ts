@@ -2079,7 +2079,7 @@ function renderChatWorkflow() {
   if (isWorkflowInProgress(record)) content.append(...workflowMessages());
   const current = record.definition.steps[record.currentIndex];
   if (record.smart?.reply && record.status === "completed") {
-    content.append(agentReply("Smart", record.smart.reply));
+    content.append(agentReply(record.smart.replyFrom ? providerNames[record.smart.replyFrom] : "Smart", record.smart.reply));
   } else if (record.smart && record.status === "waiting") {
     const controls = smartUi.controls(record, renderWorkflowActions, Boolean(activeRun()) || workflowsBusy());
     if (controls) content.append(controls);
@@ -3053,7 +3053,7 @@ function workflowRunView(record: WorkflowRun) {
     actions,
     timeline,
     ...(smartControls ? [smartControls] : []),
-    ...(record.smart?.reply ? [agentReply("Smart", record.smart.reply)] : []),
+    ...(record.smart?.reply ? [agentReply(record.smart.replyFrom ? providerNames[record.smart.replyFrom] : "Smart", record.smart.reply)] : []),
     ...(worktree ? [worktree] : []),
   ];
 }

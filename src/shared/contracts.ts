@@ -318,8 +318,9 @@ export interface SmartRunState {
   attempts: number;
   orchestrator?: SmartOrchestrator;
   reply?: string;
+  replyFrom?: SmartConnector;
   answer?: string;
-  pending?: { kind: "question"; question: string } | { kind: "freebuff"; stepId: string; prompt: string };
+  pending?: { kind: "question"; question: string } | { kind: "freebuff"; stepId: string; prompt: string; finishWithReply?: boolean };
 }
 
 export interface QuotaWindow {

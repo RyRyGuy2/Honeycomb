@@ -173,7 +173,10 @@ export function createSmartWorkflows(options: {
       const step: WorkflowAgentStep = {
         id: `step-${run.steps.length + 1}`, kind: "agent", title: task.title, providerId: choice.connector,
         model: choice.model, effort: choice.effort, mode: task.mode, edit: task.edit,
-        prompt: task.prompt, inputs, output: "", timeoutMs: STEP_TIMEOUT,
+        prompt: task.finishWithReply
+          ? `Complete and verify the whole task. Reply directly to the user with the result, checks you ran, and any limitations.\n\n${task.prompt}`
+          : task.prompt,
+        inputs, output: "", timeoutMs: STEP_TIMEOUT,
       };
       const record = addWorker(run, step);
       smart.selection[step.id] = choice;
@@ -181,7 +184,7 @@ export function createSmartWorkflows(options: {
       const prompt = workflowStepPrompt(step, earlier.filter((entry) => inputs.includes(entry.stepId)), smart.answer, boundedText(run.goal ?? "", 2_000));
       if (choice.connector === "freebuff") {
         record.status = "waiting";
-        smart.pending = { kind: "freebuff", stepId: step.id, prompt };
+        smart.pending = { kind: "freebuff", stepId: step.id, prompt, finishWithReply: task.finishWithReply };
         run.status = "waiting";
         if (await touch(run)) {
           if (!activity.stopped && run.status === "waiting") options.notify(run);
@@ -193,6 +196,7 @@ export function createSmartWorkflows(options: {
         return "waiting";
       }
       void touch(run);
+      let directReply = "";
       try {
         const workerId = options.runs.start(run.folder, {
           providerId: choice.connector, mode: task.mode, edit: task.edit, prompt,
@@ -209,6 +213,9 @@ export function createSmartWorkflows(options: {
           if (completed.diff) run.diff = completed.diff;
         }
         if (record.status === "failed") record.detail = runError(completed);
+        if (record.status === "completed" && task.finishWithReply) {
+          directReply = boundedText(completed.events.flatMap((event) => event.type === "message" ? [event.text] : []).join("\n\n"), 12_000);
+        }
       } catch (error) {
         record.status = "failed";
         record.detail = boundedText(error instanceof Error ? error.message : String(error), 1_000);
@@ -224,6 +231,11 @@ export function createSmartWorkflows(options: {
       if (limited) activity.limited.add(choice.connector);
       void touch(run);
       if (activity.stopped || record.status === "cancelled") return "cancelled";
+      if (directReply) {
+        smart.reply = directReply;
+        smart.replyFrom = choice.connector;
+        return "completed";
+      }
       if (record.status === "completed" || task.edit) return "continue";
       if (limited) {
         excluded.push(choice.connector);
@@ -260,7 +272,7 @@ export function createSmartWorkflows(options: {
             if (smart.attempts >= MAX_SMART_ATTEMPTS) throw new Error("Worker limit reached. Summarize what completed.");
             const outcome = await delegate(activity, action, catalog);
             if (outcome === "continue") break;
-            if (outcome === "cancelled") run.status = "cancelled";
+            if (outcome === "cancelled" || outcome === "completed") run.status = outcome;
             return;
           } catch (error) {
             if (activity.stopped) break;
@@ -367,7 +379,7 @@ export function createSmartWorkflows(options: {
       if (!await touch(run)) throw new Error("Could not save the workflow worktree.");
     },
     replyFreebuff(id: unknown, value: unknown, reportedModel: unknown, diff?: RunDiff) {
-      const { run, record } = pendingFreebuff(id);
+      const { run, pending, record } = pendingFreebuff(id);
       const reply = typeof value === "string" ? value.trim() : "";
       if (!reply || reply.length > MAX_FREEBUFF_REPLY || reply.includes("\0")) throw new Error("Enter a completed Freebuff reply.");
       if (typeof reportedModel === "string" && reportedModel.trim() && reportedModel.length <= 200 && !/[\u0000-\u001f]/.test(reportedModel)) {
@@ -378,6 +390,14 @@ export function createSmartWorkflows(options: {
       record.status = "completed";
       record.finishedAt = new Date().toISOString();
       delete run.smart.pending;
+      if (pending.finishWithReply) {
+        run.smart.reply = reply;
+        run.smart.replyFrom = "freebuff";
+        run.status = "completed";
+        run.finishedAt = record.finishedAt;
+        void touch(run);
+        return;
+      }
       advanceWhenIdle(run);
     },
     reroute(id: unknown) {

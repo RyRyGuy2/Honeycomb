@@ -151,6 +151,17 @@ test("the composer selection controls the orchestrator while worker routing stay
   ]);
 });
 
+test("a straightforward edit returns the worker's verified reply without another orchestrator call", async () => {
+  const { smart, requests } = service([task({ mode: "code", edit: true, finishWithReply: true }), "Added the icon. Typecheck passed."]);
+  const id = smart.start({ ...request, access: "edit" }, { name: "Test", path: "C:/test" }, "[]", parseSmartSettings(undefined));
+  await waitFor(() => smart.find(id)?.status === "completed");
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].edit, true);
+  assert.match(requests[1].prompt, /Complete and verify the whole task/);
+  assert.equal(smart.find(id).smart.reply, "Added the icon. Typecheck passed.");
+  assert.equal(smart.find(id).smart.replyFrom, "opencode");
+});
+
 test("switches both coordinator and worker away from a connector that reports a rate limit", async () => {
   const { smart, requests } = service([
     { run: { status: "failed", events: [{ type: "error", text: "Provider rate limit reached." }] } },
