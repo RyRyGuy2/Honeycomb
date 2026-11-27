@@ -38,7 +38,8 @@ export interface SaveChatProfile {
 }
 
 export interface ModelCatalog {
-  models: Array<{ id: string; name: string; available: boolean; online: boolean; efforts?: string[]; defaultEffort?: string }>;
+  models: Array<{ id: string; name: string; available: boolean; online: boolean; efforts?: string[]; defaultEffort?: string;
+    price?: { input: number; output: number } }>;
   selected: string;
   defaultEfforts?: string[];
   localError?: string;
@@ -278,13 +279,14 @@ export interface WorkflowRun {
 
 export type SmartConnector = CliProviderId | "freebuff";
 export type SmartStrength = "fast" | "coding" | "deep";
+export type SmartBilling = "free" | "included" | "metered";
 export type SmartFreebuffPolicy = "fallback" | "prefer" | "explicit" | "off";
 
 export interface SmartSettings {
   order: SmartConnector[];
   disabled: SmartConnector[];
   freebuff: SmartFreebuffPolicy;
-  strengths: Array<{ connector: SmartConnector; model: string; strengths: SmartStrength[] }>;
+  strengths: Array<{ connector: SmartConnector; model: string; strengths: SmartStrength[]; billing?: SmartBilling }>;
   allowOverage: boolean;
 }
 

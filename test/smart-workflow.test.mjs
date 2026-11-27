@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { setImmediate } from "node:timers/promises";
+import { mergeOpenCodeModels } from "../dist/providers/opencode-models.js";
 import { codexQuotaWindows, openCodeGoQuotaWindows, remainingPercent } from "../dist/service/connector-quota.js";
 import { createModelSubmissionDetector } from "../dist/service/freebuff-session.js";
 import { freebuffDirective, parseSmartSettings, smartCandidates } from "../dist/service/smart-routing.js";
@@ -75,6 +76,22 @@ test("copies the Freebuff prompt only on the Enter submitting /model", () => {
   const pasted = createModelSubmissionDetector();
   assert.equal(pasted("/model\r", false), false);
   assert.equal(pasted("\r", true), false);
+});
+
+test("prefers an advertised free model when capable and preserves stronger models for harder work", () => {
+  const opencode = connector("opencode");
+  opencode.catalog.models = mergeOpenCodeModels("opencode/fast-flash\nopencode/pro", { data: [
+    { id: "fast-flash", cost: { text: { input: { price: 0 }, output: { price: 0 } } } },
+    { id: "pro", cost: { text: { input: { price: 3 }, output: { price: 10 } } } },
+  ] });
+  opencode.catalog.selected = "opencode/pro";
+  const entries = [opencode, ...catalog.slice(1)];
+  const settings = parseSmartSettings({ order: ["codex", "opencode"] });
+  assert.equal(smartCandidates(state({ settings }), entries, task({ finishWithReply: true }))[0].model, "opencode/fast-flash");
+  assert.equal(smartCandidates(state({ settings }), entries, task({ strength: "deep" }))[0].connector, "codex");
+  const override = parseSmartSettings({ strengths: [{ connector: "codex", model: "codex-max", strengths: [], billing: "free" }],
+    order: ["codex", "opencode"] });
+  assert.equal(smartCandidates(state({ settings: override }), entries, task())[0].model, "codex-max");
 });
 
 function service(replies, entries = catalog, slots = { allowed: true }) {

@@ -8,7 +8,7 @@ import { checkProvider, providerEnvironment } from "./index.js";
 import { isOpenCodeV2, opencode, parseOpenCodeModel } from "./opencode.js";
 import { openCodeEfforts, streamOpenCodeChat } from "./stream.js";
 
-const CATALOGS = ["https://opencode.ai/zen/v1/models", "https://opencode.ai/inference/v1/models"];
+const CATALOGS = ["https://opencode.ai/inference/v1/models", "https://opencode.ai/zen/v1/models"];
 
 export function mergeOpenCodeModels(localOutput: string, catalog: unknown): ModelCatalog["models"] {
   const local = new Set<string>();
@@ -21,7 +21,7 @@ export function mergeOpenCodeModels(localOutput: string, catalog: unknown): Mode
     }
   }
 
-  const remote = new Map<string, string>();
+  const remote = new Map<string, Pick<ModelCatalog["models"][number], "name" | "price">>();
   const entries = asRecord(catalog)?.data;
   if (Array.isArray(entries)) {
     for (const entry of entries) {
@@ -29,7 +29,13 @@ export function mergeOpenCodeModels(localOutput: string, catalog: unknown): Mode
       if (typeof data?.id !== "string" || data.id.includes("/") || (data.type && data.type !== "chat")) continue;
       try {
         const id = parseOpenCodeModel(`opencode/${data.id}`);
-        remote.set(id, typeof data.name === "string" && data.name ? data.name : id);
+        const cost = asRecord(data.cost);
+        const pricing = asRecord(cost?.text);
+        const input = asRecord(pricing?.input)?.price;
+        const output = asRecord(pricing?.output)?.price;
+        const price = !cost?.multipliers && typeof input === "number" && typeof output === "number" &&
+          Number.isFinite(input) && Number.isFinite(output) && input >= 0 && output >= 0 ? { input, output } : undefined;
+        remote.set(id, { name: typeof data.name === "string" && data.name ? data.name : id, ...(price && { price }) });
       } catch {
         // Ignore entries that cannot be passed to the CLI.
       }
@@ -37,7 +43,7 @@ export function mergeOpenCodeModels(localOutput: string, catalog: unknown): Mode
   }
 
   return [...new Set([...local, ...remote.keys()])].sort().map((id) => ({
-    id, name: remote.get(id) ?? id, available: local.has(id), online: remote.has(id),
+    id, name: id, ...remote.get(id), available: local.has(id), online: remote.has(id),
   }));
 }
 

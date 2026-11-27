@@ -1,6 +1,6 @@
 import type {
   Connector, ConnectorQuota, FreebuffTerminalEvent, HoneycombApi, Run, RunUsage, SmartConnector, SmartSettings,
-  SmartStrength, WorkflowRun,
+  SmartBilling, SmartStrength, WorkflowRun,
 } from "../shared/contracts.js";
 import { addRunUsage } from "../shared/workflows.js";
 
@@ -18,6 +18,7 @@ const connectorNames: Record<SmartConnector, string> = {
   "github-copilot": "GitHub Copilot CLI", freebuff: "Freebuff",
 };
 const tagLabels: Record<SmartStrength, string> = { fast: "Fast lookup", coding: "Coding", deep: "Deep reasoning" };
+const billingLabels: Record<SmartBilling, string> = { free: "Free or local", included: "Included quota", metered: "Metered" };
 const formatNumber = new Intl.NumberFormat(undefined, { maximumFractionDigits: 4 });
 const timeLabel = new Intl.DateTimeFormat(undefined, { timeStyle: "short" });
 const dayLabel = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
@@ -229,7 +230,8 @@ export function createSmartUi(api: HoneycombApi, sources: {
     const strengthList = node("div");
     for (const [index, entry] of state.strengths.entries()) {
       const row = node("div", undefined, "smart-strength-entry");
-      row.append(node("span", `${connectorNames[entry.connector]} · ${entry.model} · ${entry.strengths.map((tag) => tagLabels[tag]).join(", ")}`),
+      const tags = [...entry.strengths.map((tag) => tagLabels[tag]), ...(entry.billing ? [billingLabels[entry.billing]] : [])];
+      row.append(node("span", [connectorNames[entry.connector], entry.model, tags.join(", ")].filter(Boolean).join(" · ")),
         button("Remove", () => { state.strengths.splice(index, 1); renderSettings(); }));
       strengthList.append(row);
     }
@@ -258,6 +260,15 @@ export function createSmartUi(api: HoneycombApi, sources: {
     connectors.addEventListener("change", () => void modelSuggestions());
     model.addEventListener("focus", () => void modelSuggestions(), { once: true });
     model.maxLength = 200;
+    const billing = node("select", undefined, "connector-input");
+    const automatic = node("option", "Automatic");
+    automatic.value = "";
+    billing.append(automatic);
+    for (const [id, label] of Object.entries(billingLabels)) {
+      const option = node("option", label);
+      option.value = id;
+      billing.append(option);
+    }
     const checks = new Map<SmartStrength, HTMLInputElement>();
     const tags = node("div", undefined, "workflow-actions");
     for (const strength of Object.keys(tagLabels) as SmartStrength[]) {
@@ -270,20 +281,22 @@ export function createSmartUi(api: HoneycombApi, sources: {
     }
     fields.replaceChildren(
       node("h3", "Connector order"), ordering, field("Freebuff preference", policy), overageLabel,
-      node("h3", "Model strengths"), strengthList,
+      node("h3", "Model preferences"), strengthList,
       node("p", "Add a model ID from the connector’s catalog. For Freebuff, use the model name you see in /model.", "connector-note"),
       field("Connector", connectors), field("Model ID or Freebuff model name", model), modelOptions, tags,
-      button("Add model strengths", () => {
+      field("Billing", billing),
+      button("Add model preference", () => {
         const id = connectors.value as SmartConnector;
         const key = model.value.trim();
         const strengths = [...checks].filter(([, input]) => input.checked).map(([tag]) => tag);
         const status = elem("smart-settings-status");
-        if (!key || !strengths.length) {
-          status.textContent = "Enter a model and choose at least one strength.";
+        if (!key || (!strengths.length && !billing.value)) {
+          status.textContent = "Enter a model and choose a strength or billing preference.";
           return;
         }
-        state.strengths = [...state.strengths.filter((entry) => entry.connector !== id || entry.model !== key), { connector: id, model: key, strengths }];
-        status.textContent = "Model strengths updated. Save Smart settings to apply them.";
+        state.strengths = [...state.strengths.filter((entry) => entry.connector !== id || entry.model !== key),
+          { connector: id, model: key, strengths, ...(billing.value && { billing: billing.value as SmartBilling }) }];
+        status.textContent = "Model preferences updated. Save Smart settings to apply them.";
         renderSettings();
       }),
     );

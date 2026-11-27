@@ -27,7 +27,11 @@ export function parseSmartSettings(value: unknown): SmartSettings {
     const tags = entry?.strengths;
     if (!connector || !model || model.length > 200 || /[\u0000-\u001f]/.test(model) || !Array.isArray(tags)) continue;
     const matching = STRENGTHS.filter((tag) => tags.includes(tag));
-    if (matching.length) strengths.set(`${connector}:${model}`, { connector, model, strengths: matching });
+    const billing = entry?.billing;
+    const selectedBilling = billing === "free" || billing === "included" || billing === "metered" ? billing : undefined;
+    if (matching.length || selectedBilling) {
+      strengths.set(`${connector}:${model}`, { connector, model, strengths: matching, ...(selectedBilling && { billing: selectedBilling }) });
+    }
   }
   return {
     order: [...order, ...SMART_CONNECTORS.filter((id) => !order.includes(id))],
@@ -126,7 +130,8 @@ export function smartCandidates(
     return entries.flatMap((model) => {
       if (excluded.includes(connector) || excluded.includes(`${connector}:${model.id}`)) return [];
       const configured = settings.strengths.find((entry) => entry.connector === connector && entry.model === model.id);
-      if (!(configured?.strengths ?? modelStrengths(model.id, model.name)).includes(task.strength)) return [];
+      const strengths = configured?.strengths.length ? configured.strengths : modelStrengths(model.id, model.name);
+      if (!strengths.includes(task.strength)) return [];
       const left = remainingPercent(quota, model.id || models.selected);
       if (left === 0 && !settings.allowOverage) return [];
       const efforts = ("efforts" in model ? model.efforts : undefined) ?? models.defaultEfforts ?? [];
@@ -134,16 +139,21 @@ export function smartCandidates(
       const preferFreebuff = settings.freebuff === "prefer" || state.freebuffDirective === "request";
       const manualRank = preferFreebuff ? Number(!manual) : Number(manual);
       const position = settings.order.indexOf(connector);
-      const rank = (left === 0 ? 1_000 : 0) + manualRank * 100 + (left !== undefined && left <= 15 ? 20 : 0)
-        + (position < 0 ? SMART_CONNECTORS.length : position) * 2;
+      const price = "price" in model ? model.price : undefined;
+      const unitPrice = price ? price.input + price.output : undefined;
+      const billing = configured?.billing ?? (unitPrice === 0 ? "free" : unitPrice !== undefined ? "metered" : left !== undefined ? "included" : undefined);
+      const rank = (left === 0 ? 1_000 : 0) + manualRank * 100 + (billing === "free" ? 0 : billing === "included" ? 10 : 20)
+        + (left !== undefined && left <= 15 ? 30 : 0);
       const suggested = task.connector === connector && task.model === model.id;
       const note = manual ? "Freebuff needs a manual handoff." : left === undefined ? "Quota unavailable."
         : left === 0 ? "Included allowance is exhausted. Paid overage is enabled." : `${Math.round(left)}% left in the limiting window.`;
-      return [{ connector, model: model.id, effort, rank, suggested, selected: model.id === models.selected, left,
-        reason: boundedText(`${task.reason || `Matches the step’s ${task.strength} requirements.`} ${note}`, 430) }];
+      return [{ connector, model: model.id, effort, rank, position, unitPrice, suggested, selected: model.id === models.selected, left,
+        fast: task.finishWithReply === true && strengths.includes("fast"),
+        reason: boundedText(`${task.reason || `Matches the step’s ${task.strength} requirements.`} ${billing === "free" && !manual ? "Free or local model. " : ""}${note}`, 430) }];
     });
   });
-  return candidates.sort((a, b) => a.rank - b.rank || Number(b.suggested) - Number(a.suggested) ||
+  return candidates.sort((a, b) => a.rank - b.rank || a.position - b.position ||
+    (a.unitPrice ?? Infinity) - (b.unitPrice ?? Infinity) || Number(b.fast) - Number(a.fast) || Number(b.suggested) - Number(a.suggested) ||
     Number(b.selected) - Number(a.selected) || (b.left ?? -1) - (a.left ?? -1))
     .map(({ connector, model, effort, reason }) => ({ connector, model, effort, reason }));
 }
