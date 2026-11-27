@@ -111,25 +111,34 @@ export async function readFreebuffTranscript(worktreePath: string) {
   }
 }
 
+function pathDirectories() {
+  return (process.env.PATH ?? "").split(delimiter)
+    .map((path) => path.trim().replace(/^"(.*)"$/, "$1")).filter(isAbsolute);
+}
+
+async function findOnPath(parts: string[], allowAlias = false) {
+  for (const directory of pathDirectories()) {
+    const file = join(directory, ...parts);
+    const info = await (allowAlias ? lstat(file) : stat(file)).catch(() => undefined);
+    if (info?.isFile() || (allowAlias && info?.isSymbolicLink())) return file;
+  }
+}
+
+export async function findFreebuffCommand(): Promise<[string, ...string[]]> {
+  if (process.platform !== "win32") throw new Error("Freebuff handoffs are available on Windows.");
+  const native = await findOnPath(["freebuff.exe"]);
+  if (native) return [native];
+  const [node, entry] = await Promise.all([findOnPath(["node.exe"]), findOnPath(["node_modules", "freebuff", "index.js"])]);
+  if (!node || !entry) throw new Error("Install Freebuff with npm install -g freebuff, then restart Honeycomb.");
+  return [node, entry];
+}
+
 export async function findFreebuffTerminal() {
   if (process.platform !== "win32") throw new Error("Freebuff handoff currently requires Windows Terminal.");
-  const directories = (process.env.PATH ?? "").split(delimiter)
-    .map((path) => path.trim().replace(/^"(.*)"$/, "$1")).filter(isAbsolute);
-  async function find(parts: string[], allowAlias = false) {
-    for (const directory of directories) {
-      const file = join(directory, ...parts);
-      const info = await (allowAlias ? lstat(file) : stat(file)).catch(() => undefined);
-      if (info?.isFile() || (allowAlias && info?.isSymbolicLink())) return file;
-    }
-  }
   // Windows exposes wt.exe as an execution alias. Node cannot stat its target.
-  const terminal = await find(["wt.exe"], true);
+  const terminal = await findOnPath(["wt.exe"], true);
   if (!terminal) throw new Error("Install Windows Terminal and enable its wt.exe execution alias.");
-  const native = await find(["freebuff.exe"]);
-  if (native) return { terminal, command: [native] };
-  const [node, entry] = await Promise.all([find(["node.exe"]), find(["node_modules", "freebuff", "index.js"])]);
-  if (!node || !entry) throw new Error("Install Freebuff with npm install -g freebuff, then restart Honeycomb.");
-  return { terminal, command: [node, entry] };
+  return { terminal, command: await findFreebuffCommand() };
 }
 
 export async function openFreebuffTerminal(target: Awaited<ReturnType<typeof findFreebuffTerminal>>, path: string, resume = false) {

@@ -1,6 +1,6 @@
 import electron = require("electron");
 import type { IpcRendererEvent } from "electron";
-import type { HoneycombApi, IpcCalls, Run, WorkflowChange } from "../shared/contracts.js" with { "resolution-mode": "import" };
+import type { FreebuffTerminalEvent, HoneycombApi, IpcCalls, Run, WorkflowChange } from "../shared/contracts.js" with { "resolution-mode": "import" };
 
 const { contextBridge, ipcRenderer } = electron;
 
@@ -53,6 +53,24 @@ const api: HoneycombApi = {
   decideWorkflow: (request) => invoke("workflow-decision", request),
   copyWorkflowFreebuff: (request) => invoke("copy-workflow-freebuff", request),
   submitWorkflowFreebuff: (request) => invoke("submit-workflow-freebuff", request),
+  smartSettings: () => invoke("smart-settings"),
+  saveSmartSettings: (request) => invoke("save-smart-settings", request),
+  connectorQuotas: (refresh) => invoke("connector-quotas", refresh),
+  previewSmart: (request) => invoke("preview-smart", request),
+  startSmart: (request) => invoke("start-smart", request),
+  answerSmart: (request) => invoke("answer-smart", request),
+  resumeSmart: (id) => invoke("resume-smart", id),
+  rerouteSmart: (id) => invoke("reroute-smart", id),
+  openSmartFreebuff: (id) => invoke("open-smart-freebuff", id),
+  copySmartFreebuff: (request) => invoke("copy-smart-freebuff", request),
+  replySmartFreebuff: (request) => invoke("reply-smart-freebuff", request),
+  freebuffTerminalInput: (request) => invoke("freebuff-terminal-input", request),
+  closeFreebuffTerminal: (id) => invoke("close-freebuff-terminal", id),
+  onFreebuffTerminal(callback) {
+    const listener = (_event: IpcRendererEvent, event: FreebuffTerminalEvent) => callback(event);
+    ipcRenderer.on("honeycomb:freebuff-terminal", listener);
+    return () => ipcRenderer.removeListener("honeycomb:freebuff-terminal", listener);
+  },
   onRunChanged(callback) {
     const listener = (_event: IpcRendererEvent, run: Run) => callback(run);
     ipcRenderer.on("honeycomb:run-changed", listener);

@@ -202,7 +202,7 @@ export function createRunService(
       }
       if (!provider) throw new Error("Choose a connector.");
       const options = optionsForProvider(provider.id);
-      const model = run.modelOverride ?? options.model;
+      const model = run.model ?? options.model;
       const { connector, executable } = await checkProvider(provider, signal, options.executable);
       if (signal.aborted) {
         await attachDiff();
@@ -345,6 +345,8 @@ export function createRunService(
         throw new Error("Invalid model.");
       }
       const modelOverride = typeof modelValue === "string" ? modelValue.trim() : "";
+      const effectiveModel = modelOverride || chatModel || (provider ? optionsForProvider(provider.id).model
+        : typeof payload?.model === "string" ? payload.model : undefined);
       const timeoutValue = payload?.timeoutMs;
       const timeoutMs = timeoutValue === undefined ? undefined : parseTimeout(timeoutValue);
       const turns = thread === undefined ? [] : conversation(thread);
@@ -383,6 +385,7 @@ export function createRunService(
         ...(worktree ? { worktree: { ...worktree } } : {}),
         ...(workflowRunId === undefined ? {} : { workflowRunId }),
         ...(workflowPlanner ? { workflowPlanner: true as const } : {}),
+        ...(effectiveModel ? { model: effectiveModel } : {}),
         ...(modelOverride ? { modelOverride } : {}),
         ...(timeoutMs === undefined ? {} : { timeoutMs }),
         prompt,

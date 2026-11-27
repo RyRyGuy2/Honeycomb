@@ -15,6 +15,8 @@ await Promise.all([
     new URL("../main/honeycomb-icon.png", import.meta.url)),
   copyFile(new URL("../../node_modules/markdown-it/dist/markdown-it.min.js", import.meta.url),
     new URL("markdown-it.js", destination)),
+  copyFile(new URL("../../node_modules/@xterm/xterm/lib/xterm.js", import.meta.url), new URL("xterm.js", destination)),
+  copyFile(new URL("../../node_modules/@xterm/xterm/css/xterm.css", import.meta.url), new URL("xterm.css", destination)),
 ]);
 
 if (process.platform === "win32") {

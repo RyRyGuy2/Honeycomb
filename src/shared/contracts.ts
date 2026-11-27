@@ -152,6 +152,8 @@ export interface Run {
   /** The workflow run that started this turn, when it came from a workflow step. */
   workflowRunId?: string;
   workflowPlanner?: true;
+  /** Effective model when a connector or chat connection supplies one. */
+  model?: string;
   /** Per-run model chosen by a workflow step. Blank turns use the connector selection. */
   modelOverride?: string;
   /** Per-run time limit in milliseconds. */
@@ -267,9 +269,72 @@ export interface WorkflowRun {
   currentIndex: number;
   steps: WorkflowStepRun[];
   worktree?: RunWorktree;
+  diff?: RunDiff;
   error?: string;
   usage?: RunUsage;
+  smart?: SmartRunState;
   revision: number;
+}
+
+export type SmartConnector = CliProviderId | "freebuff";
+export type SmartStrength = "fast" | "coding" | "deep";
+export type SmartFreebuffPolicy = "fallback" | "prefer" | "explicit" | "off";
+
+export interface SmartSettings {
+  order: SmartConnector[];
+  disabled: SmartConnector[];
+  freebuff: SmartFreebuffPolicy;
+  strengths: Array<{ connector: SmartConnector; model: string; strengths: SmartStrength[] }>;
+  allowOverage: boolean;
+}
+
+export interface SmartRunRequest {
+  goal: string;
+  projectPath?: string;
+  conversationId?: string;
+  access: "chat" | "review" | "edit";
+}
+
+export interface SmartChoice {
+  connector: SmartConnector;
+  model: string;
+  effort: string;
+  reason: string;
+}
+
+export interface SmartRunState {
+  access: SmartRunRequest["access"];
+  context: string;
+  settings: SmartSettings;
+  freebuffDirective: "exclude" | "request" | "default";
+  selection: Record<string, SmartChoice>;
+  attempts: number;
+  reply?: string;
+  answer?: string;
+  pending?: { kind: "question"; question: string } | { kind: "freebuff"; stepId: string; prompt: string };
+}
+
+export interface QuotaWindow {
+  id: string;
+  label: string;
+  remaining: number;
+  unit: "percent" | "hours" | "credits" | "requests" | "usd";
+  resetsAt?: number;
+  durationMinutes?: number;
+  models?: string[];
+}
+
+export interface ConnectorQuota {
+  connector: ProviderId | "freebuff";
+  status: "available" | "unavailable" | "stale";
+  checkedAt?: number;
+  windows: QuotaWindow[];
+}
+
+export interface FreebuffTerminalEvent {
+  id: string;
+  data?: string;
+  state?: "copied" | "clipboard-error" | "closed";
 }
 
 export interface WorkflowPlanRequest {
@@ -297,6 +362,7 @@ export interface WorkflowDecisionRequest {
 
 export type WorkflowChange =
   | { type: "run"; run: WorkflowRun }
+  | { type: "open"; runId: string }
   | { type: "definitions" };
 
 export interface AppState {
@@ -354,6 +420,19 @@ export interface IpcCalls {
   "workflow-decision": (request: WorkflowDecisionRequest) => void;
   "copy-workflow-freebuff": (request: { runId: string; stepId: string }) => void;
   "submit-workflow-freebuff": (request: { runId: string; stepId: string; reply: string }) => void;
+  "smart-settings": () => SmartSettings;
+  "save-smart-settings": (settings: SmartSettings) => SmartSettings;
+  "connector-quotas": (refresh: boolean) => ConnectorQuota[];
+  "preview-smart": (request: SmartRunRequest) => { choice?: SmartChoice; reply?: string };
+  "start-smart": (request: SmartRunRequest) => string;
+  "answer-smart": (request: { runId: string; answer: string }) => void;
+  "resume-smart": (runId: string) => void;
+  "reroute-smart": (runId: string) => void;
+  "open-smart-freebuff": (runId: string) => string;
+  "copy-smart-freebuff": (request: { runId: string; item: "model" | "task" }) => void;
+  "reply-smart-freebuff": (request: { runId: string; reply: string; model?: string }) => void;
+  "freebuff-terminal-input": (request: { id: string; data: string; enter: boolean }) => void;
+  "close-freebuff-terminal": (id: string) => void;
 }
 
 type Invoke<Channel extends keyof IpcCalls> =
@@ -401,6 +480,20 @@ export interface HoneycombApi {
   decideWorkflow: Invoke<"workflow-decision">;
   copyWorkflowFreebuff: Invoke<"copy-workflow-freebuff">;
   submitWorkflowFreebuff: Invoke<"submit-workflow-freebuff">;
+  smartSettings: Invoke<"smart-settings">;
+  saveSmartSettings: Invoke<"save-smart-settings">;
+  connectorQuotas: Invoke<"connector-quotas">;
+  previewSmart: Invoke<"preview-smart">;
+  startSmart: Invoke<"start-smart">;
+  answerSmart: Invoke<"answer-smart">;
+  resumeSmart: Invoke<"resume-smart">;
+  rerouteSmart: Invoke<"reroute-smart">;
+  openSmartFreebuff: Invoke<"open-smart-freebuff">;
+  copySmartFreebuff: Invoke<"copy-smart-freebuff">;
+  replySmartFreebuff: Invoke<"reply-smart-freebuff">;
+  freebuffTerminalInput: Invoke<"freebuff-terminal-input">;
+  closeFreebuffTerminal: Invoke<"close-freebuff-terminal">;
+  onFreebuffTerminal(callback: (event: FreebuffTerminalEvent) => void): () => void;
   onRunChanged(callback: (run: Run) => void): () => void;
   onWorkflowChanged(callback: (change: WorkflowChange) => void): () => void;
 }
