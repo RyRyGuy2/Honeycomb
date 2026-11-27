@@ -29,7 +29,9 @@ Use **Settings → Factory reset** to clear Honeycomb’s local history, saved w
 
 ### Run a Smart workflow
 
-Turn on **Smart** in the Chats composer. Choose **Preview first step** to see the proposed connector, model, and reasoning effort, or choose **Run Smart** to delegate. Smart uses the current conversation and prior results to decide whether to finish, ask a question, or run another step. In **Settings → Smart routing**, you can change the connector order, set model strengths, and configure when to use Freebuff. Say “no Freebuff” in the request to exclude it for that run.
+Turn on **Smart** in the Chats composer and select the connector and model you want to orchestrate the task. Choose **Preview first step** to see its proposed worker or **Run Smart** to launch agents as needed. A straightforward request can go to one worker, which completes the task, checks its work, and replies directly. For more involved requests, the orchestrator uses the conversation and prior results to decide what to do next.
+
+Smart favors capable free or local workers and uses quota information to conserve paid usage. If the orchestrator hits its limit, Smart picks another available model, keeps the completed results, and shows the switch in the workflow and a desktop notification. In **Settings → Smart routing**, you can change the connector order, set model strengths and billing preferences, and configure when to use Freebuff. Say “no Freebuff” in the request to exclude it for that run.
 
 When Smart reaches a Freebuff step on Windows, it sends a notification and parks the workflow. Choose **Open Freebuff** whenever you’re ready. Honeycomb copies `/model` before opening the terminal. Paste it and press Enter to open the model picker and copy the task, then select the model, paste the task, and send it. Submit the completed reply in Honeycomb to continue. You can close the app and return to a parked handoff later.
 

@@ -1,7 +1,7 @@
 import type {
   ChatPresetId, ChatProfile, CliProviderId, Connector, ConnectorStatus, ConversationContextSummary, DiffFile, HoneycombApi, ModelCatalog, ModelSelection, ProjectFolder, ProviderId, Run, RunStatus,
   RunUsage, RunWorktree, SavedWorkflow, SidebarMenuRequest, WorkflowAgentStep, WorkflowDefinition, WorkflowGateStep, WorkflowRun, WorkflowRunStatus,
-  SmartRunRequest, WorkflowPlanReply, WorkflowPlanRequest, WorkflowProviderId, WorkflowStep, WorkflowStepStatus, WorkspaceMode,
+  SmartOrchestrator, SmartRunRequest, WorkflowPlanReply, WorkflowPlanRequest, WorkflowProviderId, WorkflowStep, WorkflowStepStatus, WorkspaceMode,
 } from "../shared/contracts.js";
 import { configuredConnectors } from "../shared/connectors.js";
 import { compareTurns, conversationContext, conversationId, runMode } from "../shared/conversations.js";
@@ -1771,6 +1771,15 @@ function workflowAgentLabel(step: WorkflowAgentStep) {
     : `${providerNames[step.providerId]} · ${step.model || "Connector default"}`;
 }
 
+function orchestratorLabel(route: SmartOrchestrator) {
+  return `${providerNames[route.connector]} · ${route.model || "CLI default"}`;
+}
+
+function orchestratorNotices(record: WorkflowRun) {
+  return (record.smart?.orchestratorSwitches ?? []).map(({ from, to }) =>
+    element("p", "workflow-note", `${orchestratorLabel(from)} reached its usage limit. Continuing with ${orchestratorLabel(to)}.`));
+}
+
 function workflowAgentAccess(step: WorkflowAgentStep) {
   if (step.providerId === "freebuff") return step.edit ? "Manual · edit in worktree" : "Manual";
   if (step.edit) return "Code · edit in worktree";
@@ -2071,11 +2080,14 @@ function renderChatWorkflow() {
     item.append(workflowStatusIcon(state), text);
     steps.append(item);
   }
+  const orchestrator = record.smart?.orchestrator;
   outline.replaceChildren(element("h3", "", "Workflow outline"),
-    element("p", "history-meta", record.folder?.name ?? "Chat-only · no project access"), steps);
+    element("p", "history-meta", record.folder?.name ?? "Chat-only · no project access"),
+    ...(orchestrator ? [element("p", "history-meta", `Orchestrator: ${orchestratorLabel(orchestrator)}`)] : []), steps);
 
   const content = element("section", "conversation-turn");
   if (record.goal) content.append(feedEntry("You", record.goal, "user"));
+  content.append(...orchestratorNotices(record));
   if (isWorkflowInProgress(record)) content.append(...workflowMessages());
   const current = record.definition.steps[record.currentIndex];
   if (record.smart?.reply && record.status === "completed") {
@@ -2983,6 +2995,9 @@ function workflowRunView(record: WorkflowRun) {
     element("span", "workflow-step-meta", `${record.folder?.name ?? "Chat"} · started ${new Date(record.startedAt).toLocaleTimeString()}`),
   );
   header.append(title, status);
+  if (record.smart?.orchestrator) {
+    header.append(element("p", "workflow-step-meta", `Orchestrator: ${orchestratorLabel(record.smart.orchestrator)}`));
+  }
   const totalUsage = usageRows(record.usage);
   if (totalUsage.length) header.append(facts(totalUsage));
 
@@ -3048,6 +3063,7 @@ function workflowRunView(record: WorkflowRun) {
   return [
     header,
     ...(record.goal ? [feedEntry("Workflow prompt", record.goal, "user")] : []),
+    ...orchestratorNotices(record),
     ...workflowMessages(),
     ...(record.error && !workflowError ? [element("p", "workflow-note", record.error)] : []),
     actions,
@@ -3431,7 +3447,8 @@ async function runSmartFromChat(preview: boolean) {
         ? `${providerNames[choice.connector]} · ${choice.model || "CLI default"}${choice.effort ? ` · ${effortLabel(choice.effort)}` : ""}. ${choice.reason}`
         : plan.reply ?? "Smart did not select a first step.";
       result.textContent = plan.orchestrator
-        ? `Orchestrator: ${providerNames[plan.orchestrator.connector]} · ${plan.orchestrator.model || "CLI default"}. ${worker}` : worker;
+        ? `Orchestrator: ${orchestratorLabel(plan.orchestrator)}${plan.orchestrator.connector !== request.orchestrator.connector
+          ? " (quota fallback)" : ""}. ${worker}` : worker;
       result.hidden = false;
     } else {
       const id = await api.startSmart(request);

@@ -98,6 +98,7 @@ function service(replies, entries = catalog, slots = { allowed: true }) {
   const requests = [];
   const saved = [];
   const notifications = [];
+  const switches = [];
   const history = new Map();
   let busy = false;
   const smart = createSmartWorkflows({
@@ -128,9 +129,10 @@ function service(replies, entries = catalog, slots = { allowed: true }) {
     async save(runs) { saved.push(structuredClone(runs)); return true; },
     publish() {},
     notify: ({ id }) => notifications.push(id),
+    notifyOrchestratorSwitch: (run, from, to) => switches.push({ id: run.id, from, to }),
     async inspectChanges() { return "modified app.ts"; },
   });
-  return { smart, requests, saved, notifications };
+  return { smart, requests, saved, notifications, switches };
 }
 
 async function waitFor(predicate) {
@@ -179,14 +181,37 @@ test("a straightforward edit returns the worker's verified reply without another
   assert.equal(smart.find(id).smart.replyFrom, "opencode");
 });
 
-test("switches both coordinator and worker away from a connector that reports a rate limit", async () => {
-  const { smart, requests } = service([
+test("switches both orchestrator and worker away from a connector that reports a rate limit", async () => {
+  const { smart, requests, switches } = service([
     { run: { status: "failed", events: [{ type: "error", text: "Provider rate limit reached." }] } },
     task(), "The logs confirmed the issue.", { action: "finish", reply: "Evidence confirmed." },
   ]);
   const id = smart.start(request, undefined, "[]", parseSmartSettings(undefined));
   await waitFor(() => smart.find(id)?.status === "completed");
   assert.deepEqual(requests.map(({ providerId }) => providerId), ["opencode", "codex", "codex", "codex"]);
+  assert.deepEqual(switches.map(({ from, to }) => [from.connector, to.connector]), [["opencode", "codex"]]);
+});
+
+test("orchestrator failover carries forward completed results and skips known exhausted quota", async () => {
+  const { smart, requests, switches } = service([
+    task(), "The composer is shared across two screens.",
+    { run: { status: "failed", events: [{ type: "error", text: "You've hit your usage limit." }] } },
+    { action: "finish", reply: "Both screens are covered." },
+  ]);
+  const orchestrator = { connector: "codex", model: "codex-max", effort: "high" };
+  const id = smart.start({ ...request, orchestrator }, undefined, "[]", parseSmartSettings(undefined));
+  await waitFor(() => smart.find(id)?.status === "completed");
+  assert.match(requests[3].prompt, /shared across two screens/);
+  assert.equal(requests[3].providerId, "opencode");
+  assert.equal(switches.length, 1);
+  assert.deepEqual(smart.find(id).smart.orchestratorSwitches[0], { from: switches[0].from, to: switches[0].to });
+
+  const exhausted = service([{ action: "finish", reply: "Done." }],
+    [catalog[0], { ...catalog[1], quota: quota("codex", 0) }]);
+  const fallback = exhausted.smart.start({ ...request, orchestrator }, undefined, "[]", parseSmartSettings(undefined));
+  await waitFor(() => exhausted.smart.find(fallback)?.status === "completed");
+  assert.deepEqual(exhausted.requests.map(({ providerId }) => providerId), ["opencode"]);
+  assert.equal(exhausted.switches.length, 1);
 });
 
 test("parks a Freebuff handoff across restart without sending another notification", async () => {

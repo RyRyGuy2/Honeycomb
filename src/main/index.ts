@@ -150,6 +150,13 @@ const freebuffSessions = createFreebuffSessions({
   send: (event) => send("honeycomb:freebuff-terminal", event),
 });
 const smartNotifications = new Map<string, Notification>();
+const orchestratorNotifications = new Set<Notification>();
+
+function showSmartWorkflow(runId: string) {
+  mainWindow?.show();
+  mainWindow?.focus();
+  send("honeycomb:workflow-changed", { type: "open", runId } satisfies WorkflowChange);
+}
 const workflowRuns = createWorkflowRunner({
   runs,
   save: (records) => { void workflowRunStore.save(records); },
@@ -200,16 +207,29 @@ const smartWorkflows = createSmartWorkflows({
         title: "Smart workflow waiting for Freebuff",
         body: "Open Honeycomb when you’re ready to choose the model and send the task.",
       });
-      notice.on("click", () => {
-        mainWindow?.show();
-        mainWindow?.focus();
-        send("honeycomb:workflow-changed", { type: "open", runId: run.id } satisfies WorkflowChange);
-      });
+      notice.on("click", () => showSmartWorkflow(run.id));
       notice.on("close", () => smartNotifications.delete(run.id));
       smartNotifications.set(run.id, notice);
       notice.show();
     } catch (error) {
       console.error("Could not show the Smart Freebuff notification", error);
+    }
+  },
+  notifyOrchestratorSwitch(run, from, to) {
+    try {
+      if (!Notification.isSupported()) return;
+      const previous = `${from.connector} · ${from.model || "CLI default"}`;
+      const replacement = `${to.connector} · ${to.model || "CLI default"}`;
+      const notice = new Notification({
+        title: "Smart workflow switched orchestrators",
+        body: `${previous} reached its usage limit. Continuing with ${replacement}.`,
+      });
+      notice.on("click", () => showSmartWorkflow(run.id));
+      notice.on("close", () => orchestratorNotifications.delete(notice));
+      orchestratorNotifications.add(notice);
+      notice.show();
+    } catch (error) {
+      console.error("Could not show the Smart quota notification", error);
     }
   },
   async inspectChanges(run) {

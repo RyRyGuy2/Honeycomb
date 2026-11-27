@@ -107,7 +107,7 @@ export function parseSmartAction(run: Run): SmartAction {
   };
 }
 
-function modelStrengths(model: string, name: string): SmartStrength[] {
+export function modelStrengths(model: string, name: string): SmartStrength[] {
   const label = `${model} ${name}`;
   if (/\b(?:haiku|flash|mini|nano|luna|lite|small|fast)\b/i.test(label)) return ["fast", "coding"];
   if (/\b(?:opus|pro|astra|max|reasoning|thinking|r1|codex|sol|sonnet|terra)\b/i.test(label)) return ["coding", "deep"];

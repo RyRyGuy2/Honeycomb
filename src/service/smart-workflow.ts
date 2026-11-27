@@ -6,7 +6,7 @@ import { addRunUsage, boundedText, MAX_FREEBUFF_REPLY, runSummary, workflowStepP
 import { asRecord } from "../shared/records.js";
 import type { WorkflowStepResult } from "../shared/workflows.js";
 import {
-  freebuffDirective, isAutomaticSmartConnector, MAX_SMART_ATTEMPTS, parseSmartAction, smartCandidates, smartCoordinatorPrompt, smartEffort,
+  freebuffDirective, isAutomaticSmartConnector, MAX_SMART_ATTEMPTS, modelStrengths, parseSmartAction, smartCandidates, smartCoordinatorPrompt, smartEffort,
 } from "./smart-routing.js";
 import type { SmartCatalogEntry, SmartDelegation } from "./smart-routing.js";
 import type { WorkflowRunService } from "./workflow-runner.js";
@@ -17,7 +17,7 @@ const COORDINATE: SmartDelegation = {
   model: "", effort: "", reason: "", inputs: [],
 };
 const STEP_TIMEOUT = 5 * 60_000;
-const QUOTA_ERROR = /rate.?limit|too many requests|quota|\b429\b/i;
+const QUOTA_ERROR = /rate.?limit|usage limit|too many requests|quota|insufficient credits|\b429\b/i;
 
 function runError(run: Run) {
   const errors = run.events.flatMap((event) => event.type === "error" ? [event.text] : []);
@@ -32,6 +32,7 @@ export function createSmartWorkflows(options: {
   save: (runs: readonly WorkflowRun[]) => Promise<boolean>;
   publish: (run: WorkflowRun) => void;
   notify: (run: WorkflowRun) => void;
+  notifyOrchestratorSwitch: (run: WorkflowRun, from: SmartOrchestrator, to: SmartOrchestrator) => void;
   inspectChanges: (run: WorkflowRun) => Promise<string>;
 }) {
   const records: WorkflowRun[] = [];
@@ -125,11 +126,25 @@ export function createSmartWorkflows(options: {
         else coordinator = selected;
       }
       if (!coordinator) {
-        const route = smartCandidates(smart, automatic, COORDINATE, [...activity.limited])[0];
+        const strengths = smart.settings.strengths.find((entry) => entry.connector === selected?.connector && entry.model === selected?.model)?.strengths;
+        const wantsDeep = selected && (/^(high|xhigh|max|ultra)$/.test(selected.effort) ||
+          (strengths?.length ? strengths : modelStrengths(selected.model, "")).includes("deep"));
+        const preferred = wantsDeep ? { ...COORDINATE, strength: "deep" as const } : COORDINATE;
+        const excluded = [...activity.limited];
+        const route = smartCandidates(smart, automatic, preferred, excluded)[0]
+          ?? (wantsDeep ? smartCandidates(smart, automatic, COORDINATE, excluded)[0] : undefined);
         if (!route || !isAutomaticSmartConnector(route.connector)) break;
-        coordinator = { ...await withEffort(route, COORDINATE), connector: route.connector };
+        coordinator = { ...await withEffort(route, preferred), connector: route.connector };
       }
+      if (activity.stopped) throw new Error("The Smart workflow was stopped.");
       smart.orchestrator = coordinator;
+      if (selected && selected.connector !== coordinator.connector) {
+        (smart.orchestratorSwitches ??= []).push({ from: selected, to: coordinator });
+        if (find(run.id)) {
+          void touch(run);
+          options.notifyOrchestratorSwitch(run, selected, coordinator);
+        }
+      }
       const response = await invoke(activity, undefined, {
         providerId: coordinator.connector, mode: "chat", modelOverride: coordinator.model, effort: coordinator.effort,
         workflowPlanner: true, workflowRunId: run.id, timeoutMs: STEP_TIMEOUT,

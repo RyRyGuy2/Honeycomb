@@ -319,6 +319,7 @@ export interface SmartRunState {
   selection: Record<string, SmartChoice>;
   attempts: number;
   orchestrator?: SmartOrchestrator;
+  orchestratorSwitches?: { from: SmartOrchestrator; to: SmartOrchestrator }[];
   reply?: string;
   replyFrom?: SmartConnector;
   answer?: string;
