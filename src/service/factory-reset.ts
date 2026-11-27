@@ -5,6 +5,7 @@ import { CLI_PROVIDER_IDS } from "../shared/contracts.js";
 const RESET_MARKER = "factory-reset.pending";
 const STATE_FILES = [
   "workspace.json", "workspace.json.tmp", "workflow-runs.json", "workflow-runs.json.tmp",
+  "smart-runs.json", "smart-runs.json.tmp", "smart-settings.json", "smart-settings.json.tmp",
   "chat-connections.json", "chat-connections.json.tmp", ...CLI_PROVIDER_IDS.map((id) => id + "-model"),
 ];
 

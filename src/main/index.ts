@@ -1,5 +1,6 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme, Notification, protocol, safeStorage, session, shell } from "electron";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rmdir, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { claude, claudeModelCatalog, parseClaudeModel } from "../providers/claude.js";
@@ -15,8 +16,13 @@ import { COPILOT_ID, COPILOT_NAME, createWindowsCopilot } from "../providers/win
 import { createChatProfileStore, parseChatModel } from "../service/chat-profiles.js";
 import { applyFactoryReset, requestFactoryReset } from "../service/factory-reset.js";
 import { runProcess } from "../service/process.js";
-import { FREEBUFF_EXPORT_PATTERN, findFreebuffTerminal, findFreebuffTranscript, openFreebuffTerminal, readFreebuffTranscript, readSavedFreebuffExchange, readSavedFreebuffExchanges } from "../service/freebuff.js";
+import { FREEBUFF_EXPORT_PATTERN, findFreebuffCommand, findFreebuffTerminal, findFreebuffTranscript, openFreebuffTerminal, readFreebuffTranscript, readSavedFreebuffExchange, readSavedFreebuffExchanges } from "../service/freebuff.js";
+import { createFreebuffSessions } from "../service/freebuff-session.js";
+import { createConnectorQuotas } from "../service/connector-quota.js";
 import { createRunService } from "../service/runs.js";
+import { createSmartWorkflows } from "../service/smart-workflow.js";
+import { parseSmartSettings } from "../service/smart-routing.js";
+import type { SmartCatalogEntry } from "../service/smart-routing.js";
 import { createWorkflowRunner } from "../service/workflow-runner.js";
 import { MAX_PLAN_GOAL, workflowPlanPrompt, workflowPlanReply } from "../service/workflow-planner.js";
 import type { PlannerCatalog } from "../service/workflow-planner.js";
@@ -24,11 +30,12 @@ import { createWorkflowRunStore } from "../service/workflow-runs.js";
 import { createWorkflowStore } from "../service/workflows.js";
 import { createWorkspaceStore } from "../service/workspace.js";
 import { createWorktreeManager } from "../service/worktree.js";
-import type { CliProviderId, FreebuffContext, IpcCalls, ProjectFolder, WorkflowChange, WorkflowDefinition, WorkspaceMode } from "../shared/contracts.js";
+import type { CliProviderId, FreebuffContext, IpcCalls, ProjectFolder, SmartRunRequest, SmartSettings, WorkflowChange, WorkflowDefinition, WorkspaceMode } from "../shared/contracts.js";
 import { CLI_PROVIDER_IDS } from "../shared/contracts.js";
+import { conversationContext, runMode } from "../shared/conversations.js";
 import { isCliProvider, supportsWorktreeEditing } from "../shared/editing.js";
 import { asRecord } from "../shared/records.js";
-import { resolveWorkflowCommand, validateWorkflow, workflowRequiresProject } from "../shared/workflows.js";
+import { boundedText, MAX_FREEBUFF_REPLY, resolveWorkflowCommand, validateWorkflow, workflowRequiresProject } from "../shared/workflows.js";
 
 const APP_URL = "honeycomb://app/";
 const APP_ICON = fileURLToPath(new URL("./honeycomb-icon.png", import.meta.url));
@@ -37,6 +44,9 @@ const RENDERER_ASSETS = new Map<string, readonly [filename: string, contentType:
   ["/styles.css", ["styles.css", "text/css"]],
   ["/app.js", ["app.js", "text/javascript"]],
   ["/copilot-clipboard.js", ["copilot-clipboard.js", "text/javascript"]],
+  ["/smart.js", ["smart.js", "text/javascript"]],
+  ["/xterm.js", ["xterm.js", "text/javascript"]],
+  ["/xterm.css", ["xterm.css", "text/css"]],
   ["/shared/connectors.js", ["../shared/connectors.js", "text/javascript"]],
   ["/shared/conversations.js", ["../shared/conversations.js", "text/javascript"]],
   ["/shared/chat-presets.js", ["../shared/chat-presets.js", "text/javascript"]],
@@ -50,6 +60,7 @@ const CONTENT_POLICY = [
   "default-src 'none'",
   "script-src 'self'",
   "style-src 'self'",
+  "style-src-elem 'self' 'unsafe-inline'",
   "img-src 'self'",
   "base-uri 'none'",
   "form-action 'none'",
@@ -66,6 +77,7 @@ let pendingMutations = 0;
 const readOnlyCalls = new Set<keyof IpcCalls>([
   "state", "inspect-providers", "chat-profiles", "list-models", "list-opencode-efforts",
   "review-freebuff", "list-workflows", "list-workflow-runs",
+  "smart-settings", "connector-quotas",
 ]);
 const selectedModels: Record<CliProviderId, string> = { codex: "", opencode: "", claude: "", antigravity: "", "github-copilot": "" };
 const modelParsers = {
@@ -74,6 +86,7 @@ const modelParsers = {
 };
 let downloading: Promise<void> | undefined;
 const connectorAbort = new AbortController();
+const quotas = createConnectorQuotas(connectorAbort.signal);
 const connectorJobs = new Set<Promise<unknown>>();
 const getOpenCodePath = () => managedOpenCodePath(app.getPath("userData"));
 const modelFile = (providerId: CliProviderId) => join(app.getPath("userData"), `${providerId}-model`);
@@ -127,6 +140,15 @@ const runs = createRunService((run) => {
 });
 const workflowStore = createWorkflowStore(() => app.getPath("userData"));
 const workflowRunStore = createWorkflowRunStore(() => join(app.getPath("userData"), "workflow-runs.json"));
+const smartRunStore = createWorkflowRunStore(() => join(app.getPath("userData"), "smart-runs.json"));
+const smartSettingsPath = () => join(app.getPath("userData"), "smart-settings.json");
+let smartSettings = parseSmartSettings(undefined);
+let settingsWrites = Promise.resolve();
+const freebuffSessions = createFreebuffSessions({
+  copy: (text) => clipboard.writeText(text),
+  send: (event) => send("honeycomb:freebuff-terminal", event),
+});
+const smartNotifications = new Map<string, Notification>();
 const workflowRuns = createWorkflowRunner({
   runs,
   save: (records) => { void workflowRunStore.save(records); },
@@ -156,23 +178,131 @@ const workflowRuns = createWorkflowRunner({
     }
   },
 });
+
+const smartWorkflows = createSmartWorkflows({
+  runs,
+  available: smartCatalog,
+  openCodeEfforts: smartOpenCodeEfforts,
+  canStart: () => !workflowRuns.hasActiveRun() && !quitting && !resetting,
+  save: (records) => smartRunStore.save(records),
+  publish(run) {
+    if (run.smart?.pending?.kind !== "freebuff") {
+      smartNotifications.get(run.id)?.close();
+      smartNotifications.delete(run.id);
+    }
+    send("honeycomb:workflow-changed", { type: "run", run } satisfies WorkflowChange);
+  },
+  notify(run) {
+    try {
+      if (!Notification.isSupported()) return;
+      const notice = new Notification({
+        title: "Smart workflow waiting for Freebuff",
+        body: "Open Honeycomb when you’re ready to choose the model and send the task.",
+      });
+      notice.on("click", () => {
+        mainWindow?.show();
+        mainWindow?.focus();
+        send("honeycomb:workflow-changed", { type: "open", runId: run.id } satisfies WorkflowChange);
+      });
+      notice.on("close", () => smartNotifications.delete(run.id));
+      smartNotifications.set(run.id, notice);
+      notice.show();
+    } catch (error) {
+      console.error("Could not show the Smart Freebuff notification", error);
+    }
+  },
+  async inspectChanges(run) {
+    const record = worktrees.find(run.worktree?.id ?? "");
+    if (!record) throw new Error("The workflow worktree could not be inspected.");
+    const diff = await worktrees.diff(record);
+    return diff.files.length ? diff.files.slice(0, 12).map((file) => `${file.status} ${file.path}`).join(", ") : "No changes.";
+  },
+});
+
+function workflowIsBusy() {
+  return workflowRuns.hasActiveRun() || smartWorkflows.busy();
+}
+
+let catalogCache: { at: number; entries: Omit<SmartCatalogEntry, "quota">[] } | undefined;
+const smartEffortCache = new Map<string, { expires: number; efforts: string[] }>();
+async function smartOpenCodeEfforts(model: string) {
+  const known = smartEffortCache.get(model);
+  if (known && known.expires > Date.now()) return known.efforts;
+  const efforts = await trackConnectorJob(listOpenCodeEfforts(getOpenCodePath(), model, connectorAbort.signal));
+  if (smartEffortCache.size >= 50) smartEffortCache.clear();
+  smartEffortCache.set(model, { expires: Date.now() + 300_000, efforts });
+  return efforts;
+}
+
+async function smartCatalog(settings: SmartSettings, forceQuota = false): Promise<SmartCatalogEntry[]> {
+  if (!catalogCache || Date.now() - catalogCache.at > 60_000) {
+    const inspected = await trackConnectorJob(inspectProviders(getOpenCodePath()));
+    const detected = inspected.flatMap(({ id, status }) => status === "detected" && isCliProvider(id) ? [id] : []);
+    const entries = await Promise.all(detected.map(async (connector) => ({
+      connector,
+      catalog: await trackConnectorJob(listCliModels(connector, connectorAbort.signal))
+        .catch(() => ({ models: [], selected: selectedModels[connector] })),
+    })));
+    catalogCache = { at: Date.now(), entries };
+  }
+  const entries: Omit<SmartCatalogEntry, "quota">[] = [...catalogCache.entries];
+  if (await findFreebuffCommand().catch(() => undefined)) {
+    const preferred = settings.strengths.filter(({ connector }) => connector === "freebuff").map(({ model }) => model);
+    const models = [...new Set([...preferred, "DeepSeek V4.1 Flash Slow", "GPT-6.1 Terra"])];
+    entries.push({ connector: "freebuff", catalog: {
+      selected: models[0] ?? "",
+      models: models.map((id) => ({ id, name: id, available: true, online: true })),
+    } });
+  }
+  return Promise.all(entries.map(async (entry) => ({ ...entry, quota: await trackConnectorJob(quotas.get(entry.connector, forceQuota)) })));
+}
+
 function notifyWorkflowDefinitions() {
   send("honeycomb:workflow-changed", { type: "definitions" } satisfies WorkflowChange);
 }
 
 async function startSavedWorkflow(workflow: WorkflowDefinition, project: ProjectFolder | undefined, goal?: string) {
-  if (runs.hasActiveRun()) throw new Error("Finish or stop the active run before starting a workflow.");
+  if (runs.hasActiveRun() || workflowIsBusy()) throw new Error("Finish or stop the active run before starting a workflow.");
   const needsProject = workflowRequiresProject(workflow);
   if (needsProject) {
     if (!project) throw new Error("Choose a project in Code to run this workflow’s Code steps.");
     if (workflow.steps.some((step) => step.kind === "agent" && step.edit)) await worktrees.inspect(project.path);
     if (mode !== "code" || folder?.path !== project.path) throw new Error("The selected project changed. Try again.");
   }
+  if (runs.hasActiveRun() || workflowIsBusy()) throw new Error("Finish or stop the active run before starting a workflow.");
   return workflowRuns.start(needsProject ? project : undefined, workflow, goal);
 }
 
 function workspaceState() {
-  return { folder, projects, runs: runs.history().filter((run) => !run.workflowPlanner), mode, worktrees: worktrees.records() };
+  const history = runs.history().flatMap((run) => run.workflowPlanner
+    ? run.finishedAt ? [{ ...run, prompt: "", events: [] }] : []
+    : [run]);
+  return { folder, projects, runs: history, mode, worktrees: worktrees.records() };
+}
+
+async function smartRequest(value: unknown) {
+  const request = asRecord(value);
+  const goal = typeof request?.goal === "string" ? request.goal.trim() : "";
+  const access = request?.access;
+  if (!goal || goal.length > 8_000 || goal.includes("\0")) throw new Error("Enter a Smart task of up to 8,000 characters.");
+  if (access !== "chat" && access !== "review" && access !== "edit") throw new Error("Choose a valid access setting.");
+  const project = access === "chat" ? undefined : folder;
+  if (access === "chat" ? mode !== "chat" : mode !== "code" || !project || project.path !== request?.projectPath) {
+    throw new Error("Choose the project and workspace for this Smart task.");
+  }
+  const turns = typeof request?.conversationId === "string" ? runs.conversation(request.conversationId) : [];
+  if (request?.conversationId !== undefined && (!turns.length || turns.some((turn) => turn.workflowPlanner || turn.workflowRunId ||
+      runMode(turn) !== (project ? "code" : "chat") || turn.folder?.path !== project?.path))) {
+    throw new Error("Open the original chat before starting Smart with its context.");
+  }
+  if (access === "edit" && project) {
+    await worktrees.inspect(project.path);
+    if (folder?.path !== project.path || mode !== "code") throw new Error("The selected project changed. Try again.");
+  }
+  const context = JSON.stringify(conversationContext(turns.filter(({ finishedAt }) => finishedAt)).messages.slice(-4)
+    .map(({ user, assistant }) => ({ user: boundedText(user, 900), assistant: boundedText(assistant, 1_300) })));
+  const task: SmartRunRequest = { goal, access };
+  return { task, project, context };
 }
 
 async function removeProject(path: string) {
@@ -286,10 +416,11 @@ function handle<Channel extends keyof IpcCalls>(
 }
 
 function registerHandlers() {
+  const openingSmartFreebuff = new Set<string>();
   handle("state", workspaceState);
   handle("factory-reset", async (_request, window) => {
     function ensureIdle() {
-      if (runs.hasActiveRun() || workflowRuns.hasActiveRun()) {
+      if (runs.hasActiveRun() || workflowIsBusy()) {
         throw new Error("Finish or stop the current chat or workflow before resetting.");
       }
       if (pendingMutations > 1) {
@@ -376,6 +507,8 @@ function registerHandlers() {
     clipboard.writeText(`/export freebuff-result-${Date.now()}.md`);
   });
   handle("inspect-providers", async () => {
+    catalogCache = undefined;
+    smartEffortCache.clear();
     const [connectors, windowsCopilot] = await Promise.all([inspectProviders(getOpenCodePath()), copilot.inspect(connectorAbort.signal)]);
     return [...connectors.map((connector) => connector.id === "opencode"
       ? { ...connector, downloadAvailable: Boolean(openCodeRelease()) }
@@ -416,6 +549,7 @@ function registerHandlers() {
       await mkdir(app.getPath("userData"), { recursive: true });
       await writeFile(modelFile(providerId), model, "utf8");
       selectedModels[providerId] = model;
+      catalogCache = undefined;
     })());
   });
   handle("test-opencode", () =>
@@ -423,7 +557,7 @@ function registerHandlers() {
   handle("set-mode", async (value) => {
     if (value !== "code" && value !== "chat") throw new Error("Choose Code or Chat.");
     if (runs.hasActiveRun()) throw new Error("Finish or stop the response before changing modes.");
-    if (workflowRuns.hasActiveRun()) throw new Error("Finish or stop the workflow before changing modes.");
+    if (workflowIsBusy()) throw new Error("Finish or stop the workflow before changing modes.");
     mode = value;
     await workspace.save(workspaceState());
   });
@@ -455,7 +589,7 @@ function registerHandlers() {
     return project;
   });
   handle("start-run", async (request) => {
-    if (workflowRuns.hasActiveRun()) throw new Error("Finish or stop the running workflow first.");
+    if (workflowIsBusy()) throw new Error("Finish or stop the running workflow first.");
     const payload = asRecord(request) ?? {};
     const workspaceMode = mode;
     const project = workspaceMode === "code" ? folder : undefined;
@@ -475,7 +609,9 @@ function registerHandlers() {
       await worktrees.inspect(project.path);
     }
     if (mode !== workspaceMode || (project && folder?.path !== project.path)) throw new Error("The selected project changed. Try again.");
-    return runs.start(project, { ...payload, mode: workspaceMode }, freebuffContext);
+    if (workflowIsBusy()) throw new Error("Finish or stop the running workflow first.");
+    const { providerId, prompt, conversationId, effort, model, edit } = payload;
+    return runs.start(project, { providerId, prompt, conversationId, effort, model, edit, mode: workspaceMode }, freebuffContext);
   });
   handle("open-reply-link", (value) => {
     if (typeof value !== "string") throw new Error("Invalid link.");
@@ -491,6 +627,7 @@ function registerHandlers() {
     if (typeof worktreeId !== "string") throw new Error("Invalid worktree.");
     if (!worktrees.keep(worktreeId)) return false;
     runs.setWorktreeState(worktreeId, "kept");
+    smartWorkflows.setWorktreeState(worktreeId, "kept");
     await workspace.save(workspaceState());
     return true;
   });
@@ -502,7 +639,7 @@ function registerHandlers() {
         (run.status === "running" || run.status === "stopping"))) {
       throw new Error("Stop the run before discarding its worktree.");
     }
-    if (workflowRuns.history().some((run) => run.worktree?.id === worktreeId &&
+    if ([...workflowRuns.history(), ...smartWorkflows.history()].some((run) => run.worktree?.id === worktreeId &&
         (run.status === "running" || run.status === "waiting" || run.status === "stopping"))) {
       throw new Error("Finish or stop the workflow before discarding its worktree.");
     }
@@ -518,12 +655,13 @@ function registerHandlers() {
     if (response !== 1 || window.isDestroyed()) return false;
     await worktrees.discard(worktreeId);
     runs.setWorktreeState(worktreeId, "discarded");
+    smartWorkflows.setWorktreeState(worktreeId, "discarded");
     await workspace.save(workspaceState());
     return true;
   });
   handle("list-workflows", () => workflowStore.list());
   handle("plan-workflow", async (value) => {
-    if (runs.hasActiveRun() || workflowRuns.hasActiveRun()) throw new Error("Finish or stop the current run before planning.");
+    if (runs.hasActiveRun() || workflowIsBusy()) throw new Error("Finish or stop the current run before planning.");
     const payload = asRecord(value);
     const profile = chatProfiles.find(payload?.providerId);
     const providerId = profile?.id ?? requireProviderId(payload?.providerId);
@@ -554,7 +692,7 @@ function registerHandlers() {
     const selectable = cli ? models.get(cli)?.models : profileModels?.models.filter((entry) => entry.available);
     if (model && !selectable?.some((entry) => entry.id === model)) throw new Error("Choose a model listed for the planner connector.");
     if (profile) model ||= profileModels?.selected ?? "";
-    if (workflowRuns.hasActiveRun()) throw new Error("Finish or stop the workflow before planning.");
+    if (workflowIsBusy()) throw new Error("Finish or stop the workflow before planning.");
     const id = runs.start(undefined, {
       providerId, model, modelOverride: model, mode: "chat", workflowPlanner: true,
       prompt: workflowPlanPrompt(goal, models, previous, history),
@@ -576,7 +714,7 @@ function registerHandlers() {
     if (removed) notifyWorkflowDefinitions();
     return removed;
   });
-  handle("list-workflow-runs", () => workflowRuns.history());
+  handle("list-workflow-runs", () => [...workflowRuns.history(), ...smartWorkflows.history()]);
   handle("start-workflow", async (value) => {
     if (typeof value !== "string") throw new Error("Invalid workflow.");
     const project = mode === "code" ? folder : undefined;
@@ -593,11 +731,111 @@ function registerHandlers() {
   });
   handle("stop-workflow", async (value) => {
     if (typeof value !== "string") throw new Error("Invalid workflow run.");
-    await workflowRuns.stop(value);
+    if (smartWorkflows.find(value)) {
+      if (openingSmartFreebuff.has(value)) throw new Error("Wait for the Freebuff terminal to open, then stop the workflow.");
+      freebuffSessions.closeRun(value);
+      await smartWorkflows.stop(value);
+    } else {
+      await workflowRuns.stop(value);
+    }
   });
   handle("workflow-decision", (value) => workflowRuns.decide(value));
   handle("copy-workflow-freebuff", (value) => clipboard.writeText(workflowRuns.freebuffPrompt(value)));
   handle("submit-workflow-freebuff", (value) => workflowRuns.submitFreebuffReply(value));
+  handle("smart-settings", () => smartSettings);
+  handle("save-smart-settings", async (value) => {
+    const settings = parseSmartSettings(value);
+    const file = smartSettingsPath();
+    const op = settingsWrites.then(async () => {
+      await mkdir(app.getPath("userData"), { recursive: true });
+      await writeFile(`${file}.tmp`, JSON.stringify(settings), { mode: 0o600 });
+      await rename(`${file}.tmp`, file);
+      smartSettings = settings;
+    });
+    settingsWrites = op.catch(() => undefined);
+    await op;
+    return settings;
+  });
+  handle("connector-quotas", (force) => Promise.all(
+    CLI_PROVIDER_IDS.map((connector) => trackConnectorJob(quotas.get(connector, force === true))),
+  ));
+  handle("preview-smart", async (value) => {
+    const { task, project, context } = await smartRequest(value);
+    return smartWorkflows.preview(task, project, context, smartSettings);
+  });
+  handle("start-smart", async (value) => {
+    const { task, project, context } = await smartRequest(value);
+    return smartWorkflows.start(task, project, context, smartSettings);
+  });
+  handle("answer-smart", (value) => {
+    const { runId, answer } = asRecord(value) ?? {};
+    smartWorkflows.answer(runId, answer);
+  });
+  handle("resume-smart", (id) => smartWorkflows.resume(id));
+  handle("reroute-smart", (id) => {
+    if (typeof id === "string" && openingSmartFreebuff.has(id)) throw new Error("Wait for the Freebuff terminal to open, then choose another connector.");
+    smartWorkflows.reroute(id);
+    freebuffSessions.closeRun(id);
+  });
+  handle("open-smart-freebuff", async (id) => {
+    const { run, pending, step } = smartWorkflows.pendingFreebuff(id);
+    if (openingSmartFreebuff.has(run.id)) throw new Error("This Freebuff handoff is already opening.");
+    openingSmartFreebuff.add(run.id);
+    let temporary: string | undefined;
+    function cleanup() {
+      if (temporary) void rmdir(temporary).catch(() => undefined);
+    }
+    try {
+      const target = await findFreebuffCommand();
+      smartWorkflows.pendingFreebuff(id);
+      let cwd: string;
+      if (step.edit && run.folder) {
+        const current = run.worktree && worktrees.find(run.worktree.id);
+        if (run.worktree && (!current || current.state === "discarded" || !await worktrees.exists(current))) {
+          throw new Error("The workflow worktree is no longer available.");
+        }
+        smartWorkflows.pendingFreebuff(id);
+        const worktree = current ?? await worktrees.create(run.folder.path);
+        await smartWorkflows.attachFreebuffWorktree(id, worktree);
+        await workspace.flush();
+        cwd = worktree.path;
+      } else {
+        temporary = await mkdtemp(join(tmpdir(), "honeycomb-freebuff-"));
+        cwd = temporary;
+      }
+      return await freebuffSessions.open(run.id, target, cwd, pending.prompt, () => {
+        return !quitting && !resetting && run.status === "waiting" && run.smart.pending === pending;
+      }, cleanup);
+    } catch (error) {
+      cleanup();
+      throw error;
+    } finally {
+      openingSmartFreebuff.delete(run.id);
+    }
+  });
+  handle("copy-smart-freebuff", (value) => {
+    const { runId, item } = asRecord(value) ?? {};
+    const { pending } = smartWorkflows.pendingFreebuff(runId);
+    if (item !== "model" && item !== "task") throw new Error("Choose which Freebuff text to copy.");
+    clipboard.writeText(item === "model" ? "/model" : pending.prompt);
+  });
+  handle("reply-smart-freebuff", async (value) => {
+    const { runId, reply, model } = asRecord(value) ?? {};
+    const { run, step } = smartWorkflows.pendingFreebuff(runId);
+    if (openingSmartFreebuff.has(run.id)) throw new Error("Wait for the Freebuff terminal to open before submitting.");
+    if (typeof reply !== "string" || !reply.trim() || reply.trim().length > MAX_FREEBUFF_REPLY || reply.includes("\0")) {
+      throw new Error("Enter a completed Freebuff reply.");
+    }
+    freebuffSessions.closeRun(runId);
+    const record = step.edit && run.worktree ? worktrees.find(run.worktree.id) : undefined;
+    const diff = record ? await worktrees.diff(record).catch(() => undefined) : undefined;
+    smartWorkflows.replyFreebuff(runId, reply, model, diff);
+  });
+  handle("freebuff-terminal-input", (value) => {
+    const { id, data, enter } = asRecord(value) ?? {};
+    freebuffSessions.input(id, data, enter);
+  });
+  handle("close-freebuff-terminal", (id) => freebuffSessions.close(id));
   handle("sidebar-menu", async (request, window) => {
     const { target, id, x, y } = asRecord(request) ?? {};
     if ((target !== "project" && target !== "chat") || typeof id !== "string" ||
@@ -684,6 +922,7 @@ app.whenReady().then(async () => {
     return;
   }
   nativeTheme.themeSource = "dark";
+  if (process.platform === "win32") app.setAppUserModelId(app.isPackaged ? "Honeycomb" : process.execPath);
   app.dock?.setIcon(APP_ICON);
   const saved = await workspace.load();
   if (saved) {
@@ -691,7 +930,6 @@ app.whenReady().then(async () => {
     folder = projects.find((project) => project.path === saved.folder?.path);
     worktrees.restore(saved.worktrees ?? []);
     runs.restore(saved.runs);
-    workflowRuns.restore(await workflowRunStore.load());
     void workspace.save(workspaceState());
     for (const run of runs.history()) {
       const worktree = run.worktree;
@@ -699,6 +937,14 @@ app.whenReady().then(async () => {
       if (worktree && record) run.worktree = { ...worktree, state: record.state };
     }
     if (saved.mode === "chat") mode = "chat";
+  }
+  workflowRuns.restore(await workflowRunStore.load());
+  smartWorkflows.restore(await smartRunStore.load());
+  void smartRunStore.save(smartWorkflows.history());
+  try {
+    smartSettings = parseSmartSettings(JSON.parse(await readFile(smartSettingsPath(), "utf8")));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") console.error("Could not read Smart settings", error);
   }
   await workflowStore.importLegacy(projects.map((project) => project.path)).catch((error) => {
     console.error("Could not finish importing project workflows", error);
@@ -726,7 +972,7 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", (event) => {
   if (quitting) {
-    if (runs.hasActiveRun() || workflowRuns.hasActiveRun() || connectorJobs.size) event.preventDefault();
+    if (runs.hasActiveRun() || workflowIsBusy() || connectorJobs.size) event.preventDefault();
     return;
   }
   event.preventDefault();
@@ -734,9 +980,10 @@ app.on("before-quit", (event) => {
   connectorAbort.abort();
   void (async () => {
     // Close waiting gates first, then let the run service finish the active provider process.
-    await workflowRuns.shutdown();
+    freebuffSessions.closeAll();
+    await Promise.allSettled([workflowRuns.shutdown(), smartWorkflows.shutdown()]);
     await Promise.allSettled([runs.shutdown(), ...connectorJobs]);
-    await Promise.allSettled([workspace.flush(), workflowRunStore.flush()]);
+    await Promise.allSettled([workspace.flush(), workflowRunStore.flush(), smartRunStore.flush(), settingsWrites]);
     app.quit();
   })();
 });
