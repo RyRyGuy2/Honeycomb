@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type {
-  ProjectFolder, Run, RunDiff, SmartChoice, SmartRunRequest, SmartSettings, WorkflowAgentStep, WorkflowRun,
+  ProjectFolder, Run, RunDiff, SmartChoice, SmartOrchestrator, SmartRunRequest, SmartSettings, WorkflowAgentStep, WorkflowRun,
 } from "../shared/contracts.js";
 import { addRunUsage, boundedText, MAX_FREEBUFF_REPLY, runSummary, workflowStepPrompt } from "../shared/workflows.js";
 import { asRecord } from "../shared/records.js";
@@ -10,6 +10,7 @@ import {
 } from "./smart-routing.js";
 import type { SmartCatalogEntry, SmartDelegation } from "./smart-routing.js";
 import type { WorkflowRunService } from "./workflow-runner.js";
+import { remainingPercent } from "./connector-quota.js";
 
 const COORDINATE: SmartDelegation = {
   action: "delegate", title: "Coordinate", prompt: "", strength: "coding", mode: "chat", edit: false,
@@ -70,7 +71,7 @@ export function createSmartWorkflows(options: {
       steps: [], revision: 0,
       smart: {
         access: request.access, context, settings, freebuffDirective: current === "default" ? earlier ?? "default" : current,
-        selection: {}, attempts: 0,
+        selection: {}, attempts: 0, orchestrator: request.orchestrator,
       },
     } satisfies WorkflowRun;
   }
@@ -111,12 +112,24 @@ export function createSmartWorkflows(options: {
 
   async function next(activity: Activity, catalog: readonly SmartCatalogEntry[], repair?: string) {
     const { run } = activity;
+    const smart = run.smart!;
     let available = catalog;
     for (let attempt = 0; attempt < 2; attempt++) {
       const automatic = available.filter((entry) => isAutomaticSmartConnector(entry.connector));
-      const route = smartCandidates(run.smart!, automatic, COORDINATE, [...activity.limited])[0];
-      if (!route) break;
-      const coordinator = await withEffort(route, COORDINATE);
+      const selected = smart.orchestrator;
+      let coordinator: SmartOrchestrator | undefined;
+      if (selected && !activity.limited.has(selected.connector)) {
+        const entry = automatic.find(({ connector }) => connector === selected.connector);
+        if (!entry) throw new Error("The selected orchestrator connector is unavailable.");
+        if (remainingPercent(entry.quota, selected.model || entry.catalog.selected) === 0) activity.limited.add(selected.connector);
+        else coordinator = selected;
+      }
+      if (!coordinator) {
+        const route = smartCandidates(smart, automatic, COORDINATE, [...activity.limited])[0];
+        if (!route || !isAutomaticSmartConnector(route.connector)) break;
+        coordinator = { ...await withEffort(route, COORDINATE), connector: route.connector };
+      }
+      smart.orchestrator = coordinator;
       const response = await invoke(activity, undefined, {
         providerId: coordinator.connector, mode: "chat", modelOverride: coordinator.model, effort: coordinator.effort,
         workflowPlanner: true, workflowRunId: run.id, timeoutMs: STEP_TIMEOUT,
@@ -125,8 +138,8 @@ export function createSmartWorkflows(options: {
       run.usage = addRunUsage(run.usage, response.usage);
       if (activity.stopped) throw new Error("The Smart workflow was stopped.");
       if (response.status !== "failed" || !QUOTA_ERROR.test(runError(response))) return parseSmartAction(response);
-      activity.limited.add(route.connector);
-      available = await options.available(run.smart!.settings, true);
+      activity.limited.add(coordinator.connector);
+      available = await options.available(smart.settings, true);
     }
     throw new Error("Smart needs an available automatic connector with sufficient quota to coordinate the workflow.");
   }
@@ -325,10 +338,11 @@ export function createSmartWorkflows(options: {
       try {
         const catalog = await options.available(settings);
         const action = await next(activity, catalog);
-        if (action.action !== "delegate") return { reply: action.reply };
+        const orchestrator = activity.run.smart?.orchestrator;
+        if (action.action !== "delegate") return { reply: action.reply, orchestrator };
         const choice = smartCandidates(activity.run.smart!, catalog, action, [...activity.limited])[0];
-        return choice ? { choice: await withEffort(choice, action) }
-          : { reply: "No available model matches the step with the approved access and quota." };
+        return choice ? { choice: await withEffort(choice, action), orchestrator }
+          : { reply: "No available model matches the step with the approved access and quota.", orchestrator };
       } finally {
         active = undefined;
         release();

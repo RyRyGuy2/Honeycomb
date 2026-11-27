@@ -293,6 +293,13 @@ export interface SmartRunRequest {
   projectPath?: string;
   conversationId?: string;
   access: "chat" | "review" | "edit";
+  orchestrator: SmartOrchestrator;
+}
+
+export interface SmartOrchestrator {
+  connector: CliProviderId;
+  model: string;
+  effort: string;
 }
 
 export interface SmartChoice {
@@ -309,6 +316,7 @@ export interface SmartRunState {
   freebuffDirective: "exclude" | "request" | "default";
   selection: Record<string, SmartChoice>;
   attempts: number;
+  orchestrator?: SmartOrchestrator;
   reply?: string;
   answer?: string;
   pending?: { kind: "question"; question: string } | { kind: "freebuff"; stepId: string; prompt: string };
@@ -423,7 +431,7 @@ export interface IpcCalls {
   "smart-settings": () => SmartSettings;
   "save-smart-settings": (settings: SmartSettings) => SmartSettings;
   "connector-quotas": (refresh: boolean) => ConnectorQuota[];
-  "preview-smart": (request: SmartRunRequest) => { choice?: SmartChoice; reply?: string };
+  "preview-smart": (request: SmartRunRequest) => { choice?: SmartChoice; reply?: string; orchestrator?: SmartOrchestrator };
   "start-smart": (request: SmartRunRequest) => string;
   "answer-smart": (request: { runId: string; answer: string }) => void;
   "resume-smart": (runId: string) => void;

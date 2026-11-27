@@ -291,8 +291,8 @@ function renderControls() {
   const modelPending = Boolean(modelRequests[providerId]) || saving;
   const needsProject = mode === "code" && (!folder || (!selectedChatId && newProjectPath !== folder.path));
   const freebuffOption = get("freebuff-provider", HTMLOptionElement);
-  freebuffOption.hidden = mode !== "code";
-  freebuffOption.disabled = mode !== "code";
+  freebuffOption.hidden = smartSelected || mode !== "code";
+  freebuffOption.disabled = smartSelected || mode !== "code";
   const freebuff = !smartSelected && providerField.value === "freebuff";
   const copilot = isCopilotProvider(providerId);
   const webSigningIn = providerId === "copilot-web" && copilotWebSignInPending;
@@ -308,13 +308,14 @@ function renderControls() {
     : "Freebuff context included";
   removeAttachment.hidden = smartSelected || freebuff || !attachment;
   removeAttachment.disabled = busy;
-  get("chat-model-control").hidden = smartSelected || freebuff || copilot;
-  thinkingField.hidden = smartSelected || freebuff || copilot || modelRequired;
-  providerField.hidden = smartSelected;
+  get("chat-model-control").hidden = freebuff || copilot;
+  thinkingField.hidden = freebuff || copilot || modelRequired;
+  providerField.setAttribute("aria-label", smartSelected ? "Orchestrator connector" : "Connector");
+  chatModelField.setAttribute("aria-label", smartSelected ? "Orchestrator model" : "Model");
   const smartMode = get("smart-mode", HTMLButtonElement);
   smartMode.setAttribute("aria-pressed", String(smartSelected));
   smartMode.disabled = busy;
-  providerField.disabled = Boolean(selectedChatId) || busy;
+  providerField.disabled = (!smartSelected && Boolean(selectedChatId)) || busy;
   projectPicker.disabled = choosing || busy;
   for (const button of document.querySelectorAll<HTMLButtonElement>(".project-new-chat")) {
     button.disabled = choosing || busy;
@@ -326,7 +327,8 @@ function renderControls() {
   stop.disabled = workflow ? workflowBusy || workflow.status === "stopping" : chatActive?.status === "stopping";
   stop.textContent = (workflow ?? chatActive)?.status === "stopping" ? "Stopping…" : workflow ? "Stop workflow" : "Stop run";
   runButton.disabled = workflowInvocation ? busy || workflowBusy || choosing : needsProject || busy || choosing || !promptField.value.trim() ||
-    (!smartSelected && (webSigningIn || (!freebuff && (modelPending || provider?.status !== "detected" || (modelRequired && !chatModelField.value)))));
+    (smartSelected ? !isCliProvider(providerField.value) || modelPending || provider?.status !== "detected"
+      : webSigningIn || (!freebuff && (modelPending || provider?.status !== "detected" || (modelRequired && !chatModelField.value))));
   const preview = get("smart-preview", HTMLButtonElement);
   preview.hidden = !smartSelected || workflowInvocation;
   preview.disabled = runButton.disabled;
@@ -350,13 +352,14 @@ function renderControls() {
     message = workflowActive ? "A workflow step is running. Choose its run in the sidebar to follow it."
       : `${active.providerName} is ${statusLabels[active.status].toLowerCase()}.`;
   }
-  if (!message && smartSelected) message = workflowsBusy() ? "A workflow is running." : "Smart chooses models and connectors for this task.";
+  if (!message && smartSelected && workflowsBusy()) message = "A workflow is running.";
   if (!message && freebuff) message = worktreeBusy ? "Working on the Freebuff handoff…" : "Paste and send the copied prompt in Freebuff.";
   if (!message && provider?.status === "checking") message = `Checking for ${provider.name}…`;
   if (!message && provider?.status !== "detected") message = `${provider?.name ?? "The connector"} is unavailable. See Connectors for details.`;
   if (!message && modelPending) message = saving ? `Saving ${provider?.name} model…` : `Loading ${provider?.name} models…`;
   if (!message && webSigningIn) message = "Finish signing in in the Copilot window.";
   if (!message && modelRequired && !chatModelField.value) message = "Choose a model or enter a model ID in Connectors.";
+  if (!message && smartSelected) message = "This model orchestrates the workflow and chooses which agents to launch.";
   if (chatStatus.textContent !== message) chatStatus.textContent = message;
 }
 
@@ -370,9 +373,9 @@ function isCopilotProvider(value: string): value is "windows-copilot" | "copilot
 }
 
 function renderChatProviders(first = chatTurns()[0]) {
-  const previous = first?.providerId ?? providerField.value;
+  const previous = (smartSelected ? undefined : first?.providerId) ?? providerField.value;
   providerField.querySelectorAll("[data-chat-connector]").forEach((option) => option.remove());
-  if (mode === "chat") {
+  if (mode === "chat" && !smartSelected) {
     const available = connectors.filter((connector) => connector.chatOnly);
     if (first && !isCliProvider(first.providerId) && !available.some((connector) => connector.id === first.providerId)) {
       available.push({ id: first.providerId, name: first.providerName, status: "missing" });
@@ -385,7 +388,9 @@ function renderChatProviders(first = chatTurns()[0]) {
       providerField.append(option);
     }
   }
-  providerField.value = mode === "chat" && previous === "freebuff" ? "codex" : previous;
+  providerField.value = smartSelected && !isCliProvider(previous)
+    ? connectors.find(({ id, status }) => isCliProvider(id) && status === "detected")?.id ?? "codex"
+    : mode === "chat" && previous === "freebuff" ? "codex" : previous;
   if (!providerField.value) providerField.value = "codex";
 }
 
@@ -3312,17 +3317,19 @@ get("smart-mode").addEventListener("click", () => {
   smartSelected = !smartSelected;
   actionError = "";
   get("smart-preview-result").hidden = true;
-  renderControls();
+  renderChatProviders();
+  renderComposerProvider();
   promptField.focus();
 });
 get("smart-preview").addEventListener("click", () => void runSmartFromChat(true));
 providerField.addEventListener("change", () => {
   actionError = "";
+  get("smart-preview-result").hidden = true;
   if (providerField.value === "freebuff" && draftKey && !pendingFreebuff()) {
     const worktree = latestActiveFreebuff();
     if (worktree) freebuffAttachments.set(draftKey, { worktreeId: worktree.id, source: "saved" });
   }
-  if (draftKey && !supportsWorktreeEditing(chatProviderId())) editAccess.delete(draftKey);
+  if (!smartSelected && draftKey && !supportsWorktreeEditing(chatProviderId())) editAccess.delete(draftKey);
   renderChats();
   renderComposerProvider();
 });
@@ -3400,12 +3407,15 @@ get("composer").addEventListener("submit", (event) => {
 
 async function runSmartFromChat(preview: boolean) {
   if (starting || runButton.disabled) return;
+  const connector = providerField.value;
+  if (!isCliProvider(connector)) return;
   const draft = promptField.value;
   const request: SmartRunRequest = {
     goal: draft,
     projectPath: mode === "code" ? (chatTurns()[0]?.folder?.path ?? newProjectPath) : undefined,
     conversationId: selectedChatId,
     access: mode === "chat" ? "chat" : accessPicker.value === "edit" ? "edit" : "review",
+    orchestrator: { connector, model: chatModelField.value, effort: thinkingField.value },
   };
   starting = true;
   actionError = "";
@@ -3417,9 +3427,11 @@ async function runSmartFromChat(preview: boolean) {
       const plan = await api.previewSmart(request);
       if (promptField.value !== draft) return;
       const choice = plan.choice;
-      result.textContent = choice
+      const worker = choice
         ? `${providerNames[choice.connector]} · ${choice.model || "CLI default"}${choice.effort ? ` · ${effortLabel(choice.effort)}` : ""}. ${choice.reason}`
         : plan.reply ?? "Smart did not select a first step.";
+      result.textContent = plan.orchestrator
+        ? `Orchestrator: ${providerNames[plan.orchestrator.connector]} · ${plan.orchestrator.model || "CLI default"}. ${worker}` : worker;
       result.hidden = false;
     } else {
       const id = await api.startSmart(request);

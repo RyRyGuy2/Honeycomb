@@ -21,7 +21,9 @@ const task = (fields = {}) => ({
   action: "delegate", title: "Gather evidence", prompt: "Inspect the evidence", strength: "coding",
   mode: "chat", edit: false, model: "", effort: "", reason: "", inputs: [], ...fields,
 });
-const request = { goal: "Resolve the reported issue", access: "chat" };
+const request = { goal: "Resolve the reported issue", access: "chat",
+  orchestrator: { connector: "opencode", model: "opencode-go/fast-flash", effort: "" },
+};
 
 function state(fields = {}) {
   return { access: "chat", settings: parseSmartSettings(undefined), freebuffDirective: "default", ...fields };
@@ -137,6 +139,16 @@ test("uses chat context, repairs malformed decisions, and adapts the next model 
   assert.match(requests[3].prompt, /Import parsing is the bottleneck/);
   assert.match(requests[4].prompt, /Import parsing is the bottleneck/);
   assert.equal(smart.find(id).usage.inputTokens, 60);
+});
+
+test("the composer selection controls the orchestrator while worker routing stays independent", async () => {
+  const { smart, requests } = service([task(), "Verified", { action: "finish", reply: "Done." }]);
+  const orchestrator = { connector: "codex", model: "codex-max", effort: "high" };
+  const id = smart.start({ ...request, orchestrator }, undefined, "[]", parseSmartSettings(undefined));
+  await waitFor(() => smart.find(id)?.status === "completed");
+  assert.deepEqual(requests.map(({ providerId, modelOverride, effort }) => [providerId, modelOverride, effort]), [
+    ["codex", "codex-max", "high"], ["opencode", "opencode-go/fast-flash", "medium"], ["codex", "codex-max", "high"],
+  ]);
 });
 
 test("switches both coordinator and worker away from a connector that reports a rate limit", async () => {

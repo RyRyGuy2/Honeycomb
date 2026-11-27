@@ -12,6 +12,7 @@ import { checkProvider, inspectProviders, providerEnvironment } from "../provide
 import { installOpenCodeRelease, managedOpenCodePath, openCodeRelease } from "../providers/opencode-install.js";
 import { listOpenCodeEfforts, listOpenCodeModels, testOpenCode } from "../providers/opencode-models.js";
 import { opencode, parseOpenCodeModel } from "../providers/opencode.js";
+import { parseEffort } from "../providers/stream.js";
 import { COPILOT_ID, COPILOT_NAME, createWindowsCopilot } from "../providers/windows-copilot.js";
 import { createChatProfileStore, parseChatModel } from "../service/chat-profiles.js";
 import { applyFactoryReset, requestFactoryReset } from "../service/factory-reset.js";
@@ -301,7 +302,15 @@ async function smartRequest(value: unknown) {
   }
   const context = JSON.stringify(conversationContext(turns.filter(({ finishedAt }) => finishedAt)).messages.slice(-4)
     .map(({ user, assistant }) => ({ user: boundedText(user, 900), assistant: boundedText(assistant, 1_300) })));
-  const task: SmartRunRequest = { goal, access };
+  const selection = asRecord(request?.orchestrator);
+  const connector = selection?.connector;
+  if (!isCliProvider(connector)) throw new Error("Choose a CLI connector and model to orchestrate the workflow.");
+  const task: SmartRunRequest = {
+    goal, access, orchestrator: {
+      connector, model: modelParsers[connector](selection?.model ?? ""),
+      effort: parseEffort(selection?.effort, connector) ?? "",
+    },
+  };
   return { task, project, context };
 }
 
