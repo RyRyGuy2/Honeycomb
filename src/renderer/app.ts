@@ -1,13 +1,14 @@
 import type {
   ChatPresetId, ChatProfile, CliProviderId, Connector, ConnectorStatus, ConversationContextSummary, DiffFile, HoneycombApi, ModelCatalog, ModelSelection, ProjectFolder, ProviderId, Run, RunStatus,
   RunUsage, RunWorktree, SavedWorkflow, SidebarMenuRequest, WorkflowAgentStep, WorkflowDefinition, WorkflowGateStep, WorkflowRun, WorkflowRunStatus,
-  WorkflowPlanReply, WorkflowPlanRequest, WorkflowProviderId, WorkflowStep, WorkflowStepStatus, WorkspaceMode,
+  SmartRunRequest, WorkflowPlanReply, WorkflowPlanRequest, WorkflowProviderId, WorkflowStep, WorkflowStepStatus, WorkspaceMode,
 } from "../shared/contracts.js";
 import { configuredConnectors } from "../shared/connectors.js";
 import { compareTurns, conversationContext, conversationId, runMode } from "../shared/conversations.js";
 import { isCliProvider, supportsWorktreeEditing } from "../shared/editing.js";
 import { chatPresets, isChatPreset } from "../shared/chat-presets.js";
 import { copilotClipboardMarkdown, copilotCodeBlock } from "./copilot-clipboard.js";
+import { createSmartUi } from "./smart.js";
 import type { FreebuffAttachment, FreebuffContext, FreebuffReview, WorktreeRecord } from "../shared/contracts.js";
 import {
   DEFAULT_GATE_REVISIONS, DEFAULT_STEP_TIMEOUT_MS, MAX_FREEBUFF_REPLY, MAX_GATE_FEEDBACK, MAX_GATE_REVISIONS,
@@ -158,6 +159,8 @@ type WorkflowView =
 
 let workflows: SavedWorkflow[] = [];
 const workflowRuns = new Map<string, WorkflowRun>();
+const smartUi = createSmartUi(api, { connectors: () => connectors, runs: () => runs.values(), workflows: () => workflowRuns.values() });
+let smartSelected = false;
 let selectedChatWorkflowId: string | undefined;
 let workflowView: WorkflowView = { kind: "solo" };
 const plannerProvider = get("workflow-plan-provider", HTMLSelectElement);
@@ -214,6 +217,7 @@ function showView(name: string) {
     renderComposerProvider();
   }
   if (name === "workflows") renderWorkflows();
+  if (name === "settings") smartUi.openSettings();
 }
 
 function chatHistory() {
@@ -279,7 +283,7 @@ function renderControls() {
   const workflowActive = Boolean(active?.workflowRunId);
   const chatActive = workflowActive || active?.workflowPlanner ? undefined : active;
   const workflow = selectedChatWorkflow();
-  const busy = Boolean(active) || starting || switchingMode || worktreeBusy;
+  const busy = Boolean(active) || workflowsBusy() || starting || switchingMode || worktreeBusy;
   const stop = get("stop-run", HTMLButtonElement);
   const providerId = chatProviderId();
   const provider = connectors.find((connector) => connector.id === providerId);
@@ -289,7 +293,7 @@ function renderControls() {
   const freebuffOption = get("freebuff-provider", HTMLOptionElement);
   freebuffOption.hidden = mode !== "code";
   freebuffOption.disabled = mode !== "code";
-  const freebuff = providerField.value === "freebuff";
+  const freebuff = !smartSelected && providerField.value === "freebuff";
   const copilot = isCopilotProvider(providerId);
   const webSigningIn = providerId === "copilot-web" && copilotWebSignInPending;
   const modelRequired = providerId.startsWith("chat:");
@@ -298,14 +302,18 @@ function renderControls() {
   const attachment = pendingFreebuff();
   const contextStatus = get("composer-freebuff-status");
   const removeAttachment = get("remove-freebuff-context", HTMLButtonElement);
-  contextStatus.hidden = freebuff || (!attachment && !chatTurns().some((turn) => turn.freebuffContext));
+  contextStatus.hidden = smartSelected || freebuff || (!attachment && !chatTurns().some((turn) => turn.freebuffContext));
   contextStatus.textContent = attachment
     ? attachment.source === "export" ? "Freebuff transcript attached" : "Freebuff exchange attached"
     : "Freebuff context included";
-  removeAttachment.hidden = freebuff || !attachment;
+  removeAttachment.hidden = smartSelected || freebuff || !attachment;
   removeAttachment.disabled = busy;
-  get("chat-model-control").hidden = freebuff || copilot;
-  thinkingField.hidden = freebuff || copilot || modelRequired;
+  get("chat-model-control").hidden = smartSelected || freebuff || copilot;
+  thinkingField.hidden = smartSelected || freebuff || copilot || modelRequired;
+  providerField.hidden = smartSelected;
+  const smartMode = get("smart-mode", HTMLButtonElement);
+  smartMode.setAttribute("aria-pressed", String(smartSelected));
+  smartMode.disabled = busy;
   providerField.disabled = Boolean(selectedChatId) || busy;
   projectPicker.disabled = choosing || busy;
   for (const button of document.querySelectorAll<HTMLButtonElement>(".project-new-chat")) {
@@ -317,18 +325,21 @@ function renderControls() {
   stop.hidden = workflow ? !isWorkflowInProgress(workflow) : !chatActive;
   stop.disabled = workflow ? workflowBusy || workflow.status === "stopping" : chatActive?.status === "stopping";
   stop.textContent = (workflow ?? chatActive)?.status === "stopping" ? "Stopping…" : workflow ? "Stop workflow" : "Stop run";
-  runButton.disabled = workflowInvocation ? busy || workflowBusy || choosing : needsProject || busy || choosing || webSigningIn || !promptField.value.trim() ||
-    (!freebuff && (modelPending || provider?.status !== "detected" || (modelRequired && !chatModelField.value)));
+  runButton.disabled = workflowInvocation ? busy || workflowBusy || choosing : needsProject || busy || choosing || !promptField.value.trim() ||
+    (!smartSelected && (webSigningIn || (!freebuff && (modelPending || provider?.status !== "detected" || (modelRequired && !chatModelField.value)))));
+  const preview = get("smart-preview", HTMLButtonElement);
+  preview.hidden = !smartSelected || workflowInvocation;
+  preview.disabled = runButton.disabled;
   const freshFreebuff = document.querySelector<HTMLButtonElement>("[data-freebuff-fresh]");
   if (freshFreebuff) freshFreebuff.disabled = !freebuff || runButton.disabled;
-  const canEdit = mode === "code" && supportsWorktreeEditing(providerId);
+  const canEdit = mode === "code" && (smartSelected || supportsWorktreeEditing(providerId));
   const editing = canEdit && draftKey !== undefined && editAccess.has(draftKey);
   get("composer-access").hidden = mode !== "code" || freebuff;
   accessPicker.disabled = busy || choosing;
   accessPicker.title = canEdit ? "Choose whether to review or edit in a separate Git worktree." : "This connector supports read-only review in Honeycomb.";
   editAccessOption.disabled = !canEdit;
   accessPicker.value = editing ? "edit" : "review";
-  get("send-label").textContent = workflowInvocation ? "Run workflow" : freebuff ? (resumeFreebuff ? "Continue in Freebuff" : "Open in Freebuff")
+  get("send-label").textContent = workflowInvocation ? "Run workflow" : smartSelected ? "Run Smart" : freebuff ? (resumeFreebuff ? "Continue in Freebuff" : "Open in Freebuff")
     : editing ? "Send edit" : selectedChatId || mode === "chat" ? "Send" : "Run task";
   chatStatus.dataset.error = String(Boolean(actionError));
 
@@ -339,6 +350,7 @@ function renderControls() {
     message = workflowActive ? "A workflow step is running. Choose its run in the sidebar to follow it."
       : `${active.providerName} is ${statusLabels[active.status].toLowerCase()}.`;
   }
+  if (!message && smartSelected) message = workflowsBusy() ? "A workflow is running." : "Smart chooses models and connectors for this task.";
   if (!message && freebuff) message = worktreeBusy ? "Working on the Freebuff handoff…" : "Paste and send the copied prompt in Freebuff.";
   if (!message && provider?.status === "checking") message = `Checking for ${provider.name}…`;
   if (!message && provider?.status !== "detected") message = `${provider?.name ?? "The connector"} is unavailable. See Connectors for details.`;
@@ -1750,12 +1762,12 @@ const workflowProviderOptions: ReadonlyArray<readonly [WorkflowProviderId, strin
 ];
 
 function workflowAgentLabel(step: WorkflowAgentStep) {
-  return step.providerId === "freebuff" ? "Freebuff · manual handoff"
+  return step.providerId === "freebuff" ? `Freebuff · ${step.model || "manual handoff"}`
     : `${providerNames[step.providerId]} · ${step.model || "Connector default"}`;
 }
 
 function workflowAgentAccess(step: WorkflowAgentStep) {
-  if (step.providerId === "freebuff") return "Manual";
+  if (step.providerId === "freebuff") return step.edit ? "Manual · edit in worktree" : "Manual";
   if (step.edit) return "Code · edit in worktree";
   return step.mode === "code" ? "Code · read-only" : "Chat · no project access";
 }
@@ -1805,7 +1817,7 @@ function renderPlannerControls() {
   plannerModel.disabled = plannerBusy || loading || !provider;
   get("workflow-plan-send", HTMLButtonElement).disabled = plannerBusy || Boolean(active) ||
     loading || !provider || !plannerGoal.value.trim();
-  stop.hidden = !active?.workflowPlanner;
+  stop.hidden = !active?.workflowPlanner || Boolean(active.workflowRunId);
   stop.disabled = active?.status === "stopping";
   const edit = get("workflow-plan-edit", HTMLButtonElement);
   edit.hidden = !plannerDraft;
@@ -1989,6 +2001,10 @@ function isWorkflowInProgress(run: WorkflowRun) {
   return run.status === "running" || run.status === "waiting" || run.status === "stopping";
 }
 
+function workflowsBusy() {
+  return [...workflowRuns.values()].some((run) => isWorkflowInProgress(run) && (run.status !== "waiting" || !run.smart));
+}
+
 function workflowStatusIcon(status: WorkflowRunStatus | WorkflowStepStatus) {
   const glyph = {
     pending: "○", running: "", waiting: "◷", stopping: "", completed: "✓",
@@ -2041,9 +2057,12 @@ function renderChatWorkflow() {
     if (isWorkflowInProgress(record) && index === record.currentIndex) item.setAttribute("aria-current", "step");
     const text = element("div");
     const access = step.kind === "agent" ? workflowAgentAccess(step) : step.judgeStepId ? "Automatic review" : "Human review";
+    const route = record.smart && step.kind === "agent" ? ` · ${workflowAgentLabel(step)}${step.effort ? ` · ${effortLabel(step.effort)}` : ""}` : "";
     const status = state === "waiting" && isWaitingForFreebuff(record) ? "Waiting for Freebuff" : workflowStepLabels[state];
     text.append(element("span", "workflow-step-title", step.title),
-      element("span", "workflow-step-meta", `${status} · ${access}`));
+      element("span", "workflow-step-meta", `${status} · ${access}${route}`));
+    const reason = record.smart?.selection[step.id]?.reason;
+    if (reason) text.append(element("span", "workflow-step-meta", reason));
     item.append(workflowStatusIcon(state), text);
     steps.append(item);
   }
@@ -2054,7 +2073,12 @@ function renderChatWorkflow() {
   if (record.goal) content.append(feedEntry("You", record.goal, "user"));
   if (isWorkflowInProgress(record)) content.append(...workflowMessages());
   const current = record.definition.steps[record.currentIndex];
-  if (record.status === "completed") {
+  if (record.smart?.reply && record.status === "completed") {
+    content.append(agentReply("Smart", record.smart.reply));
+  } else if (record.smart && record.status === "waiting") {
+    const controls = smartUi.controls(record, renderWorkflowActions, Boolean(activeRun()) || workflowsBusy());
+    if (controls) content.append(controls);
+  } else if (record.status === "completed") {
     const judges = new Set(record.definition.steps.flatMap((step) => step.kind === "gate" && step.judgeStepId ? [step.judgeStepId] : []));
     const lastAgent = [...record.definition.steps].reverse().find((step) => step.kind === "agent" && !judges.has(step.id));
     const lastStep = record.steps.find((step) => step.stepId === lastAgent?.id);
@@ -2068,7 +2092,7 @@ function renderChatWorkflow() {
     content.append(freebuffHandoffControls(record, current.id));
   } else {
     const status = element("p", record.error ? "workflow-error" : "workflow-note",
-      record.error ?? workflowStatusLabels[record.status]);
+      record.error ?? (record.smart && record.status === "running" && !current ? "Selecting the next step…" : workflowStatusLabels[record.status]));
     status.setAttribute("role", "status");
     content.append(status);
   }
@@ -2103,6 +2127,7 @@ async function loadWorkflowRuns() {
     // Workflow run history is optional; the timeline simply starts empty.
   }
   renderChatWorkflow();
+  renderControls();
 }
 
 async function loadWorkflows() {
@@ -2150,10 +2175,11 @@ function renderWorkflowSidebar() {
     return button;
   });
   list.replaceChildren(...(items.length ? items : [element("p", "workflow-empty", "No saved workflows yet.")]));
-  const handoff = [...workflowRuns.values()].find(isWaitingForFreebuff);
-  if (handoff) {
-    const button = element("button", "button sidebar-action", "Freebuff reply needed");
+  for (const handoff of [...workflowRuns.values()].filter((run) => isWaitingForFreebuff(run) || run.smart && isWorkflowInProgress(run))) {
+    const label = isWaitingForFreebuff(handoff) ? "Freebuff reply needed" : `Smart · ${workflowStatusLabels[handoff.status]}`;
+    const button = element("button", "button sidebar-action", label);
     button.type = "button";
+    button.title = handoff.goal ?? handoff.workflowName;
     button.addEventListener("click", () => {
       workflowView = { kind: "run", runId: handoff.id };
       workflowError = "";
@@ -2851,7 +2877,8 @@ function scheduleWorkflowRunRender(run: Run) {
   }, 150);
 }
 
-function workflowWorktreeRun(record: WorkflowRun) {
+function workflowWorktreeRun(record: WorkflowRun): Pick<Run, "worktree" | "diff"> | undefined {
+  if (record.smart && record.worktree) return record;
   for (let index = record.steps.length - 1; index >= 0; index--) {
     const id = record.steps[index]?.runId;
     const run = id ? runs.get(id) : undefined;
@@ -2907,6 +2934,7 @@ function gateControls(record: WorkflowRun, gate: WorkflowGateStep) {
 }
 
 function isWaitingForFreebuff(record: WorkflowRun) {
+  if (record.smart) return record.status === "waiting" && record.smart.pending?.kind === "freebuff";
   const step = record.definition.steps[record.currentIndex];
   return record.status === "waiting" && step?.kind === "agent" && step.providerId === "freebuff";
 }
@@ -2957,7 +2985,7 @@ function workflowRunView(record: WorkflowRun) {
   const back = element("button", "button", "Workflow");
   back.type = "button";
   back.dataset.action = "show-definition";
-  actions.append(back);
+  if (!record.smart) actions.append(back);
   const inProgress = record.status === "running" || record.status === "waiting" || record.status === "stopping";
   if (inProgress) {
     const stop = element("button", "button", record.status === "stopping" ? "Stopping…" : "Stop workflow");
@@ -2985,6 +3013,8 @@ function workflowRunView(record: WorkflowRun) {
       ? `${workflowAgentLabel(step)}${step.effort ? ` · ${effortLabel(step.effort)}` : ""} · ${step.edit ? "Edit in worktree" : step.mode === "chat" ? "Chat" : "Read-only"}`
       : `${step.judgeStepId ? "Automatic review" : "Human review"} · up to ${step.maxRevisions} ${step.maxRevisions === 1 ? "revision" : "revisions"}`;
     item.append(element("p", "workflow-step-meta", meta));
+    const reason = record.smart?.selection[step.id]?.reason;
+    if (reason) item.append(element("p", "workflow-note", reason));
     const stepUsage = usageRows(stepRun?.usage);
     if (stepUsage.length) item.append(facts(stepUsage));
     if (stepRun?.detail) item.append(element("p", "workflow-note", stepRun.detail));
@@ -2999,7 +3029,7 @@ function workflowRunView(record: WorkflowRun) {
     if (record.status === "waiting" && stepRun?.status === "waiting" && step.kind === "gate") {
       item.append(gateControls(record, step));
     }
-    if (isWaitingForFreebuff(record) && stepRun?.status === "waiting") {
+    if (!record.smart && isWaitingForFreebuff(record) && stepRun?.status === "waiting") {
       item.append(freebuffHandoffControls(record, step.id));
     }
     timeline.append(item);
@@ -3008,6 +3038,7 @@ function workflowRunView(record: WorkflowRun) {
   const diffRun = workflowWorktreeRun(record);
   const changes = diffRun ? runChanges(diffRun, true) : undefined;
   const worktree = changes ?? (record.worktree ? worktreeFallback(record.worktree) : undefined);
+  const smartControls = smartUi.controls(record, renderWorkflowActions, Boolean(activeRun()) || workflowsBusy());
 
   return [
     header,
@@ -3016,6 +3047,8 @@ function workflowRunView(record: WorkflowRun) {
     ...(record.error && !workflowError ? [element("p", "workflow-note", record.error)] : []),
     actions,
     timeline,
+    ...(smartControls ? [smartControls] : []),
+    ...(record.smart?.reply ? [agentReply("Smart", record.smart.reply)] : []),
     ...(worktree ? [worktree] : []),
   ];
 }
@@ -3147,7 +3180,7 @@ get("workflow-plan-new").addEventListener("click", () => {
 });
 get("workflow-plan-stop").addEventListener("click", () => {
   const run = activeRun();
-  if (run?.workflowPlanner) void api.stopRun(run.id).catch((error) => {
+  if (run?.workflowPlanner && !run.workflowRunId) void api.stopRun(run.id).catch((error) => {
     get("workflow-plan-status").textContent = actionMessage(error, "Could not stop the planner.");
   });
 });
@@ -3168,6 +3201,13 @@ get("chat-workflow-feed").addEventListener("click", handleWorkflowPanelClick);
 get("workflow-panel").addEventListener("input", onWorkflowInput);
 get("workflow-panel").addEventListener("change", onWorkflowInput);
 api.onWorkflowChanged((change) => {
+  if (change.type === "open") {
+    void loadWorkflowRuns().then(() => {
+      showView("chats");
+      openChatWorkflow(change.runId);
+    });
+    return;
+  }
   if (change.type === "definitions") {
     void loadWorkflows().then(() => {
       if (workflowView.kind === "edit") renderWorkflowSidebar();
@@ -3176,6 +3216,7 @@ api.onWorkflowChanged((change) => {
     return;
   }
   if (!rememberWorkflowRun(change.run)) return;
+  if (!get("settings").hidden) smartUi.renderUsage();
   if (workflowView.kind === "run" && workflowView.runId === change.run.id) renderWorkflowPanel();
   if (change.run.goal) {
     renderChatWorkflow();
@@ -3263,8 +3304,18 @@ promptField.addEventListener("keydown", (event) => {
 
 promptField.addEventListener("input", () => {
   actionError = "";
+  get("smart-preview-result").hidden = true;
   renderControls();
 });
+
+get("smart-mode").addEventListener("click", () => {
+  smartSelected = !smartSelected;
+  actionError = "";
+  get("smart-preview-result").hidden = true;
+  renderControls();
+  promptField.focus();
+});
+get("smart-preview").addEventListener("click", () => void runSmartFromChat(true));
 providerField.addEventListener("change", () => {
   actionError = "";
   if (providerField.value === "freebuff" && draftKey && !pendingFreebuff()) {
@@ -3336,12 +3387,53 @@ get("composer").addEventListener("submit", (event) => {
     void runWorkflowFromChat(invocation);
     return;
   }
+  if (smartSelected) {
+    void runSmartFromChat(false);
+    return;
+  }
   if (providerField.value === "freebuff") {
     const existing = latestActiveFreebuff();
     void freebuffAction("send", existing?.id);
   }
   else void startTask();
 });
+
+async function runSmartFromChat(preview: boolean) {
+  if (starting || runButton.disabled) return;
+  const draft = promptField.value;
+  const request: SmartRunRequest = {
+    goal: draft,
+    projectPath: mode === "code" ? (chatTurns()[0]?.folder?.path ?? newProjectPath) : undefined,
+    conversationId: selectedChatId,
+    access: mode === "chat" ? "chat" : accessPicker.value === "edit" ? "edit" : "review",
+  };
+  starting = true;
+  actionError = "";
+  const result = get("smart-preview-result");
+  result.hidden = true;
+  renderControls();
+  try {
+    if (preview) {
+      const plan = await api.previewSmart(request);
+      if (promptField.value !== draft) return;
+      const choice = plan.choice;
+      result.textContent = choice
+        ? `${providerNames[choice.connector]} · ${choice.model || "CLI default"}${choice.effort ? ` · ${effortLabel(choice.effort)}` : ""}. ${choice.reason}`
+        : plan.reply ?? "Smart did not select a first step.";
+      result.hidden = false;
+    } else {
+      const id = await api.startSmart(request);
+      if (promptField.value === draft) promptField.value = "";
+      if (!workflowRuns.has(id)) await loadWorkflowRuns();
+      openChatWorkflow(id);
+    }
+  } catch (error) {
+    showError(error);
+  } finally {
+    starting = false;
+    renderControls();
+  }
+}
 
 async function runWorkflowFromChat(invocation: string) {
   if (starting || workflowBusy) return;
@@ -3376,12 +3468,18 @@ window.addEventListener("focus", refreshLatestFreebuff);
 api.onRunChanged((run) => {
   const previous = runs.get(run.id);
   if (!remember(run)) return;
+  const inspected = currentWorkflowRun();
+  if (previous?.status !== run.status && inspected?.status === "waiting" && inspected.smart && !inspected.smart.pending) renderWorkflowPanel();
+  if (!get("settings").hidden && (!previous || previous.status !== run.status || run.events.at(-1)?.type === "usage")) smartUi.renderUsage();
   if (workflowView.kind === "plan") renderPlannerControls();
   scheduleWorkflowRunRender(run);
   if (run.workflowRunId) {
     const workflow = selectedChatWorkflow();
     if (workflow?.id === run.workflowRunId && workflow.status === "completed") renderChatWorkflow();
-    if (previous?.status !== run.status) renderControls();
+    if (previous?.status !== run.status) {
+      renderControls();
+      if (workflow?.smart && workflow.status === "waiting" && !workflow.smart.pending) renderChatWorkflow();
+    }
     return;
   }
   if (previous?.status === run.status) {
@@ -3403,6 +3501,7 @@ api.getState().then((state) => {
   mode = state.mode === "chat" ? "chat" : "code";
   refreshLatestFreebuff();
   for (const run of state.runs) remember(run);
+  if (!get("settings").hidden) smartUi.renderUsage();
   selectedChatId ??= recentChatId();
   renderWorkspaceMode();
   void loadWorkflows();

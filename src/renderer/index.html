@@ -5,7 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Honeycomb</title>
     <link rel="stylesheet" href="./styles.css">
+    <link rel="stylesheet" href="./xterm.css">
     <script src="./markdown-it.js"></script>
+    <script src="./xterm.js"></script>
     <script type="module" src="./app.js"></script>
   </head>
   <body>
@@ -142,6 +144,8 @@
             </p>
             <div class="composer-actions">
               <div class="composer-options">
+                <button type="button" id="smart-mode" class="button button-small" aria-pressed="false">Smart</button>
+                <button type="button" id="smart-preview" class="button button-small" hidden>Preview first step</button>
                 <div id="composer-access" hidden>
                   <label class="visually-hidden" for="project-access">Project access</label>
                   <select id="project-access" class="composer-select">
@@ -174,6 +178,7 @@
               </button>
             </div>
           </form>
+          <p id="smart-preview-result" class="chat-status" role="status" hidden></p>
           <p id="chat-status" class="chat-status" role="status" aria-live="polite"></p>
         </div>
       </section>
@@ -335,8 +340,30 @@
     </main>
     <main id="settings" class="library" aria-labelledby="settings-title" hidden>
       <div class="library-header">
-        <h1 id="settings-title">App data</h1>
+        <h1 id="settings-title">Settings</h1>
       </div>
+      <section class="connector-card smart-settings-card" aria-labelledby="usage-title">
+        <h2 id="usage-title">Connector usage</h2>
+        <div class="workflow-actions">
+          <label>Activity <select id="usage-period" class="connector-input">
+            <option value="hour">Hourly · last 24 hours</option>
+            <option value="day" selected>Daily · last 7 days</option>
+            <option value="week">Weekly · last 8 weeks</option>
+          </select></label>
+          <button type="button" id="refresh-quotas" class="button">Refresh quota</button>
+        </div>
+        <p class="connector-note">OpenCode Go quota uses OPENCODE_GO_API_KEY or OPENCODE_API_KEY from the app’s environment.</p>
+        <p id="quota-status" class="chat-status" role="status"></p>
+        <div id="connector-usage"></div>
+      </section>
+      <section class="connector-card smart-settings-card" aria-labelledby="smart-settings-title">
+        <h2 id="smart-settings-title">Smart routing</h2>
+        <form id="smart-settings-form">
+          <div id="smart-settings-fields"></div>
+          <button type="submit" class="button button-primary">Save Smart settings</button>
+          <p id="smart-settings-status" class="chat-status" role="status"></p>
+        </form>
+      </section>
       <section class="connector-card" aria-labelledby="factory-reset-title">
         <h2 id="factory-reset-title">Factory reset</h2>
         <p class="connector-note" id="factory-reset-description">Clear Honeycomb’s local history, saved workflows, project list, connectors, and Copilot Web sign-in. Project files and Git worktrees stay on disk.</p>
@@ -344,5 +371,16 @@
         <p id="factory-reset-status" class="chat-status" role="status"></p>
       </section>
     </main>
+    <dialog id="freebuff-terminal-dialog" class="freebuff-terminal-dialog" aria-labelledby="freebuff-terminal-title">
+      <h2 id="freebuff-terminal-title">Freebuff</h2>
+      <p id="freebuff-terminal-instructions" class="connector-note"></p>
+      <div id="freebuff-terminal-screen" class="freebuff-terminal-screen"></div>
+      <p id="freebuff-terminal-status" class="chat-status" role="status"></p>
+      <div class="workflow-actions">
+        <button type="button" class="button" id="terminal-copy-model">Copy /model</button>
+        <button type="button" class="button" id="terminal-copy-task">Copy task</button>
+        <button type="button" class="button" id="terminal-close">Close terminal</button>
+      </div>
+    </dialog>
   </body>
 </html>

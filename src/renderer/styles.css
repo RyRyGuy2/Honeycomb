@@ -949,3 +949,83 @@ textarea.workflow-input { resize: vertical; line-height: 1.5; }
 .workflow-history-list { display: grid; gap: 5px; }
 .workflow-history-run { display: flex; align-items: center; gap: 10px; }
 .workflow-run-status { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; margin-top: -14px; }
+.composer #smart-mode[aria-pressed="true"] {
+  border-color: currentColor;
+  color: var(--accent, #f1bf63);
+}
+
+.smart-settings-card {
+  margin-bottom: 1rem;
+}
+
+#smart-settings-fields,
+#connector-usage {
+  display: grid;
+  gap: .75rem;
+  margin: .75rem 0;
+}
+
+.smart-connector-order,
+.quota-windows {
+  margin: .25rem 0;
+  padding-inline-start: 1.4rem;
+}
+
+.smart-connector-order li,
+.smart-strength-entry {
+  margin: .3rem 0;
+}
+
+.smart-connector-order label {
+  display: inline-block;
+  min-width: min(16rem, 55%);
+}
+
+.smart-connector-order button,
+.smart-strength-entry button {
+  margin-left: .35rem;
+}
+
+.smart-usage-card {
+  border: 1px solid var(--border, #454545);
+  border-radius: .5rem;
+  padding: .8rem;
+}
+
+.smart-usage-card h3 {
+  margin: 0 0 .45rem;
+}
+
+.smart-usage-card details {
+  margin-top: .5rem;
+}
+
+.smart-usage-card details p {
+  margin-bottom: .2rem;
+}
+
+.freebuff-terminal-dialog {
+  background: var(--surface, #242424);
+  color: inherit;
+  border: 1px solid var(--border, #454545);
+  border-radius: .65rem;
+  max-width: calc(100vw - 2rem);
+  padding: 1rem;
+}
+
+.freebuff-terminal-dialog::backdrop {
+  background: rgb(0 0 0 / 65%);
+}
+
+.freebuff-terminal-dialog h2 {
+  margin: 0;
+}
+
+.freebuff-terminal-screen {
+  margin: .75rem 0;
+  background: #000;
+  border-radius: .4rem;
+  min-height: 12rem;
+  overflow: auto;
+  padding: .5rem;
+}
