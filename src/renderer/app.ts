@@ -1639,10 +1639,11 @@ async function connectorAction(providerId: ProviderId, action: () => Promise<voi
 async function saveModel(picker: HTMLSelectElement) {
   const fromChat = picker === chatModelField;
   const providerId = fromChat ? chatProviderId() : selectedConnectorId;
+  if (fromChat) get("smart-preview-result").hidden = true;
   if (fromChat && mode === "chat" && providerId === "codex") {
     codexChatModel = picker.value;
     actionError = "";
-    renderControls();
+    renderComposerProvider();
     return;
   }
   const catalog = modelCatalogs[providerId];
@@ -3363,6 +3364,7 @@ accessPicker.addEventListener("change", () => {
   renderControls();
 });
 thinkingField.addEventListener("change", () => {
+  get("smart-preview-result").hidden = true;
   const provider = chatProviderId();
   const space = mode === "chat" && provider === "codex" ? "chat-codex" : provider;
   selectedEfforts.set(space + ":" + chatModelField.value, thinkingField.value);
