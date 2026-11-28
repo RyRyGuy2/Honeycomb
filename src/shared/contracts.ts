@@ -394,6 +394,7 @@ export interface SidebarMenuRequest {
 
 export interface IpcCalls {
   "copy-install-command": (command: string) => void;
+  "copy-workflow-command": (id: string) => void;
   "open-freebuff": (request: { prompt: string; id?: string; replace?: boolean }) => WorktreeRecord;
   "review-freebuff": (id: string) => FreebuffReview;
   "copy-freebuff-export": () => void;
@@ -452,6 +453,7 @@ type Invoke<Channel extends keyof IpcCalls> =
 
 export interface HoneycombApi {
   copyInstallCommand: Invoke<"copy-install-command">;
+  copyWorkflowCommand: Invoke<"copy-workflow-command">;
   openFreebuff: Invoke<"open-freebuff">;
   reviewFreebuff: Invoke<"review-freebuff">;
   copyFreebuffExport: Invoke<"copy-freebuff-export">;

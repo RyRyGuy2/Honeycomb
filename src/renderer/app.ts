@@ -2313,7 +2313,22 @@ function workflowDetail(workflow: SavedWorkflow) {
     ? project ? `Code steps run in ${project.name}.` : "Choose a project in Code to run this workflow’s Code steps."
     : "This workflow runs in Chat without a project.");
   const command = element("p", "workflow-note");
-  command.append("Run from Chats with ", element("code", "", `/workflow ${workflow.id} <prompt>`));
+  const copyCommand = element("button", "workflow-command-copy");
+  copyCommand.type = "button";
+  copyCommand.setAttribute("aria-label", "Copy workflow command");
+  const copyStatus = element("span", "visually-hidden");
+  copyStatus.setAttribute("role", "status");
+  copyCommand.addEventListener("click", async () => {
+    try {
+      await api.copyWorkflowCommand(workflow.id);
+      copyCommand.dataset.copied = "true";
+      copyStatus.textContent = "Workflow command copied.";
+    } catch {
+      copyCommand.dataset.copied = "false";
+      copyStatus.textContent = "Could not copy the workflow command.";
+    }
+  });
+  command.append("Run from Chats with ", element("code", "", `/workflow ${workflow.id} <prompt>`), copyCommand, copyStatus);
   const history = workflowRunHistory(workflow.id);
   return [header, flow, ...workflowMessages(), actions, hint, command, ...(history ? [history] : [])];
 }

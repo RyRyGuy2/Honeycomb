@@ -36,7 +36,7 @@ import { CLI_PROVIDER_IDS } from "../shared/contracts.js";
 import { conversationContext, runMode } from "../shared/conversations.js";
 import { isCliProvider, supportsWorktreeEditing } from "../shared/editing.js";
 import { asRecord } from "../shared/records.js";
-import { boundedText, MAX_FREEBUFF_REPLY, resolveWorkflowCommand, validateWorkflow, workflowRequiresProject } from "../shared/workflows.js";
+import { boundedText, isWorkflowId, MAX_FREEBUFF_REPLY, resolveWorkflowCommand, validateWorkflow, workflowRequiresProject } from "../shared/workflows.js";
 
 const APP_URL = "honeycomb://app/";
 const APP_ICON = fileURLToPath(new URL("./honeycomb-icon.png", import.meta.url));
@@ -484,6 +484,12 @@ function registerHandlers() {
       throw new Error("Invalid CLI install command.");
     }
     clipboard.writeText(command);
+  });
+  handle("copy-workflow-command", async (id) => {
+    if (!isWorkflowId(id) || !(await workflowStore.list()).some((workflow) => workflow.id === id)) {
+      throw new Error("Invalid workflow.");
+    }
+    clipboard.writeText(`/workflow ${id} <prompt>`);
   });
   let openingFreebuff = false;
   handle("open-freebuff", async (request) => {

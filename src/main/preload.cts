@@ -13,6 +13,7 @@ function invoke<Channel extends keyof IpcCalls>(
 
 const api: HoneycombApi = {
   copyInstallCommand: (command) => invoke("copy-install-command", command),
+  copyWorkflowCommand: (id) => invoke("copy-workflow-command", id),
   getState: () => invoke("state"),
   factoryReset: () => invoke("factory-reset"),
   inspectProviders: () => invoke("inspect-providers"),

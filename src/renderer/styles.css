@@ -872,6 +872,31 @@ main { grid-column: 3; }
   font-size: 12px;
 }
 .workflow-note { color: var(--muted); font-size: 12px; line-height: 1.5; }
+.workflow-command-copy {
+  position: relative;
+  width: 22px;
+  height: 22px;
+  margin-left: 5px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  vertical-align: middle;
+}
+.workflow-command-copy:hover, .workflow-command-copy:focus-visible { background: var(--hover); color: var(--text); }
+.workflow-command-copy::before, .workflow-command-copy::after {
+  position: absolute;
+  width: 9px;
+  height: 11px;
+  border: 1.5px solid currentColor;
+  border-radius: 2px;
+  content: "";
+}
+.workflow-command-copy::before { top: 4px; left: 7px; }
+.workflow-command-copy::after { top: 7px; left: 4px; background: var(--control); }
+.workflow-command-copy[data-copied="true"]::after { background: var(--accent-wash); }
+.workflow-command-copy[data-copied="false"] { color: var(--accent-hover); }
 .workflow-steps { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
 .workflow-step-row {
   display: flex;
